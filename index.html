@@ -3,16 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Washi Klang</title>
+<title>Washi Andon</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #120d08; overflow: hidden; cursor: none; }
+  html, body { margin: 0; height: 100%; background: #0e0806; overflow: hidden; cursor: none; }
   canvas { display: block; width: 100vw; height: 100vh; }
   #hud { position: fixed; left: 18px; bottom: 16px; font: 12px/1.6 -apple-system, "Helvetica Neue", sans-serif;
-         color: #d8c6a8; text-shadow: 0 1px 3px #000; opacity: 0; transition: opacity .8s; pointer-events: none; }
+         color: #e8cfa8; text-shadow: 0 1px 3px #000; opacity: 0; transition: opacity .8s; pointer-events: none; }
   body.show-hud #hud { opacity: .9; }
-  kbd { border: 1px solid rgba(216,198,168,.5); padding: 0 5px; border-radius: 3px; }
+  kbd { border: 1px solid rgba(232,207,168,.5); padding: 0 5px; border-radius: 3px; }
   #start { position: fixed; inset: 0; display: grid; place-items: center; font: 15px -apple-system, sans-serif;
-           color: #efe2cb; background: rgba(18,13,8,.35); cursor: pointer; text-shadow: 0 1px 4px #000; }
+           color: #f3e2c6; background: rgba(14,8,6,.35); cursor: pointer; text-shadow: 0 1px 4px #000; }
   #start[hidden] { display: none; }
 </style>
 </head>
@@ -22,17 +22,15 @@
 <div id="hud"></div>
 <script id="fs" type="x-shader/x-fragment">
 precision highp float;
-uniform sampler2D uData;      // je Box: rgb = Lichtfarbe * Helligkeit
-uniform vec2 uGrid;           // Spalten, Reihen
-uniform vec2 uRes;
-uniform float uCell;          // Boxgroesse in Pixeln
-uniform vec2 uOrigin;
-uniform float uTime;
+uniform sampler2D uData;      // je Feld: rgb = Lichtfarbe * Helligkeit (Ton, Muster)
+uniform sampler2D uInk;       // Sumi-e-Malerei: rgb = Tuschefarbe, a = Deckkraft
+uniform vec2 uGrid, uRes, uOrigin;
+uniform float uCell, uTime, uPaint;
+uniform vec4 uLamp0, uLamp1;  // Lichtquellen hinter dem Papier: x, y (Pixel), Radius, Staerke
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float noise(vec2 p) {
-  vec2 i = floor(p), f = fract(p);
-  vec2 u = f * f * (3.0 - 2.0 * f);
+  vec2 i = floor(p), f = fract(p), u = f * f * (3.0 - 2.0 * f);
   return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
 }
 float fbm(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { s += a * noise(p); p *= 2.03; a *= 0.5; } return s; }
@@ -40,68 +38,76 @@ float fbm(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { s += a
 vec3 cellLight(vec2 id) {
   vec2 uv = (clamp(id, vec2(0.0), uGrid - 1.0) + 0.5) / uGrid;
   vec3 c = texture2D(uData, uv).rgb;
-  return c * c;               // Texturwerte sind gamma-kodiert
+  return c * c;
 }
+float lamp(vec4 l, vec2 p) { vec2 d = (p - l.xy) / l.z; return l.w * exp(-dot(d, d)); }
 
 void main() {
-  vec2 p = (gl_FragCoord.xy - uOrigin) / uCell;          // in Boxen
-  if (p.x < 0.0 || p.y < 0.0 || p.x >= uGrid.x || p.y >= uGrid.y) {   // Rand = dunkler Rahmen
-    float g = fbm(gl_FragCoord.xy / uCell * vec2(1.5, 12.0));
-    gl_FragColor = vec4(vec3(0.075, 0.058, 0.043) * (0.85 + 0.3 * g), 1.0);
+  vec2 px = gl_FragCoord.xy;
+  vec2 p = (px - uOrigin) / uCell;
+  vec2 q = px / uCell;
+
+  // Rahmen: dunkler Lack mit weichem Glanz, feine Holzmaserung
+  if (p.x < 0.0 || p.y < 0.0 || p.x >= uGrid.x || p.y >= uGrid.y) {
+    float g = fbm(vec2(q.x * 0.5, q.y * 10.0));
+    float sheen = 0.5 + 0.5 * sin(px.y / uRes.y * 3.1416);
+    vec3 lac = vec3(0.070, 0.040, 0.030) * (0.8 + 0.35 * g) * (0.85 + 0.25 * sheen);
+    gl_FragColor = vec4(lac, 1.0);
     return;
   }
   vec2 id = floor(p), f = fract(p);
-  vec3 L = cellLight(id);
-
-  // Licht hinter Diffusor + Washi: fast gleichmaessig, Mitte leicht heller, weicher Abfall zu den Stegen.
-  // Getrennt in x und y berechnet (keine Diagonalen / kein Stern).
-  float fx = smoothstep(0.0, 0.5, min(f.x, 1.0 - f.x));
-  float fy = smoothstep(0.0, 0.5, min(f.y, 1.0 - f.y));
-  float prof = (0.70 + 0.30 * fx) * (0.70 + 0.30 * fy);
-
-  // wenig Streulicht ueber den Steg, ebenfalls getrennt je Richtung
   float ex = min(f.x, 1.0 - f.x), ey = min(f.y, 1.0 - f.y);
-  vec3 nx = cellLight(id + vec2(f.x < 0.5 ? -1.0 : 1.0, 0.0));
-  vec3 ny = cellLight(id + vec2(0.0, f.y < 0.5 ? -1.0 : 1.0));
-  vec3 light = L * prof + 0.12 * nx * exp(-ex / 0.05) + 0.12 * ny * exp(-ey / 0.05);
 
-  // Washi: lange Kozo-Fasern, Wolken (ungleichmaessige Papierdicke), feines Korn
-  vec2 q = gl_FragCoord.xy / uCell;
-  float fib = fbm(vec2(q.x * 2.2, q.y * 26.0) + 3.1);
-  float fib2 = fbm(vec2(q.x * 30.0, q.y * 2.6) + 9.4);    // einzelne Querfasern
-  float cloud = fbm(q * 1.3 + 7.3);
-  float grain = hash(floor(gl_FragCoord.xy));
-  float paper = 0.78 + 0.26 * cloud + 0.14 * (fib - 0.5) + 0.06 * (fib2 - 0.5) + 0.03 * (grain - 0.5);
+  // Laternenlicht: grosses, warmes Leuchten aus der Mitte (Lichtquellen hinter dem Papier)
+  float glow = lamp(uLamp0, px) + lamp(uLamp1, px) + 0.05;
+  vec3 C = cellLight(id);                                  // Ton / Muster je Feld
+  float cb = dot(C, vec3(0.3, 0.55, 0.15));
+  vec3 ccol = cb > 0.0001 ? C / cb : vec3(1.0);
+  // Glutfarbe: Mitte goldpfirsich, zum Rand rosig/amber
+  vec2 cUV = px / uRes - 0.5;
+  vec3 warm = mix(vec3(1.0, 0.86, 0.62), vec3(0.95, 0.58, 0.46), smoothstep(0.05, 0.55, length(cUV)));   // Kern goldweiss, Rand rosig
+  vec3 light = warm * mix(vec3(1.0), ccol, 0.35) * glow * (0.55 + 0.9 * cb);
 
-  // Patina: grossflaechige Vergilbung, leichte Flecken, dunklere Leimspuren entlang der Stege
-  float age = fbm(q * 0.35 + 21.7);
-  float stain = smoothstep(0.62, 0.78, fbm(q * 0.9 + 4.2));
-  float glue = exp(-min(ex, ey) / 0.04) * 0.10;
-  vec3 tint = mix(vec3(1.0, 0.93, 0.81), vec3(0.96, 0.84, 0.62), age);
-  tint *= 1.0 - 0.10 * stain - glue;
+  // Washi: Fasern, Wolken, Knitterfalten
+  float fib = fbm(vec2(q.x * 2.4, q.y * 24.0) + 3.1);
+  float fib2 = fbm(vec2(q.x * 26.0, q.y * 2.2) + 9.4);
+  float cloud = fbm(q * 1.2 + 7.3);
+  float cr = abs(noise(q * 0.9 + 2.0) - 0.5) + abs(noise(q * 1.7 + 8.0) - 0.5) * 0.6;
+  float crease = 1.0 - smoothstep(0.0, 0.045, cr);        // feine Knicklinien
+  float paper = 0.80 + 0.26 * cloud + 0.14 * (fib - 0.5) + 0.07 * (fib2 - 0.5) - 0.11 * crease
+              + 0.03 * (hash(floor(px)) - 0.5);
+  vec3 col = light * vec3(1.0, 0.93, 0.83) * paper;
 
-  vec3 col = light * tint * paper;
-  float lum = dot(col, vec3(0.3, 0.55, 0.15));
-  col = mix(vec3(lum), col, 0.78);
-  col += vec3(0.012, 0.008, 0.004) * paper * tint;       // Restlicht: tiefbraunes Glimmen
+  // Sumi-e: Tusche absorbiert Licht (dunkle Aeste, rote Ahornblaetter, Tuscheflaechen)
+  vec4 ink = texture2D(uInk, px / uRes);
+  col *= mix(vec3(1.0), ink.rgb, ink.a * uPaint);
 
-  float edge = min(ex, ey);
-  col *= mix(0.10, 1.0, smoothstep(0.010, 0.026, edge)); // Steg-Linie
-  col = 1.0 - exp(-col * 1.9);                           // weiche Lichter
-  vec2 v = gl_FragCoord.xy / uRes - 0.5;
-  col *= 1.0 - 0.30 * dot(v, v);                         // leichte Vignette
-  gl_FragColor = vec4(sqrt(max(col, 0.0)), 1.0);
+  // Kumiko-Stab: weicher Schatten auf dem Papier (Tiefe), dann dunkler Lackstab
+  float sh = exp(-ex / 0.07) * 0.22 + exp(-ey / 0.07) * 0.22;
+  col *= 1.0 - min(0.4, sh);
+  col += vec3(0.010, 0.005, 0.003) * paper;                // Restglimmen
+  col = 1.0 - exp(-col * 1.8);
+  col = sqrt(max(col, 0.0));
+
+  float w = 0.018;
+  float bar = max(1.0 - smoothstep(w - 0.006, w + 0.003, ex), 1.0 - smoothstep(w - 0.006, w + 0.003, ey));
+  float bg = fbm(ex < ey ? vec2(q.x * 40.0, q.y * 1.5) : vec2(q.x * 1.5, q.y * 40.0));
+  vec3 lacquer = vec3(0.16, 0.065, 0.045) * (0.7 + 0.5 * bg);     // rotbrauner Lack, vor dem Licht fast Silhouette
+  lacquer += vec3(0.20, 0.10, 0.06) * glow * 0.12;                // Streiflicht an der Kante
+  col = mix(col, lacquer, bar);
+  gl_FragColor = vec4(col, 1.0);
 }
 </script>
 <script>
 "use strict";
-// ---------------------------------------------------------------- Einstellungen (URL: ?modus=glut&reihen=8&demo=1)
+// ---------------------------------------------------------------- Einstellungen (?modus=feld|glut|wellen &reihen=6 &malerei=0 &demo=1 &seed=3)
 const q = new URLSearchParams(location.search);
-let mode = q.get("modus") || "feld";          // feld | glut | wellen
-const ROWS = +(q.get("reihen") || 8);
+let mode = q.get("modus") || "feld";
+const ROWS = +(q.get("reihen") || 6);
 let demo = q.get("demo") === "1";
-const NB = 10;                                // Frequenzbaender
-const K_MIN = 1800, K_MAX = 6500;             // WWA: Amber -> Kaltweiss
+let paint = q.get("malerei") === "0" ? 0 : 1;
+let seed = +(q.get("seed") || Math.floor(Math.random() * 1e6));
+const NB = 10, K_MIN = 1800, K_MAX = 4500;     // Laternenlicht: Amber bis warmes Weiss
 
 function kelvinRGB(k) {
   const t = k / 100; let r, g, b;
@@ -110,10 +116,11 @@ function kelvinRGB(k) {
   b = t >= 66 ? 255 : t <= 19 ? 0 : 138.5177312231 * Math.log(t - 10) - 305.0447927307;
   return [r, g, b].map(v => Math.max(0, Math.min(255, v)) / 255);
 }
+function rng(s) { return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
 
 // ---------------------------------------------------------------- WebGL
 const cv = document.getElementById("c");
-const gl = cv.getContext("webgl", { antialias: false, premultipliedAlpha: false });
+const gl = cv.getContext("webgl", { antialias: false });
 function shader(type, src) {
   const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
   if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
@@ -123,41 +130,122 @@ const prog = gl.createProgram();
 gl.attachShader(prog, shader(gl.VERTEX_SHADER, "attribute vec2 a;void main(){gl_Position=vec4(a,0.,1.);}"));
 gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, document.getElementById("fs").textContent));
 gl.linkProgram(prog); gl.useProgram(prog);
-const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
 const aLoc = gl.getAttribLocation(prog, "a"); gl.enableVertexAttribArray(aLoc); gl.vertexAttribPointer(aLoc, 2, gl.FLOAT, false, 0, 0);
 const U = n => gl.getUniformLocation(prog, n);
-const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+function makeTex(unit, filter) {
+  const t = gl.createTexture(); gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+const dataTex = makeTex(0, gl.NEAREST), inkTex = makeTex(1, gl.LINEAR);
+gl.uniform1i(U("uData"), 0); gl.uniform1i(U("uInk"), 1);
+
+// ---------------------------------------------------------------- Sumi-e-Malerei (prozedural, pro Start anders; ?seed=… fixiert)
+function paintInk(w, h, cell) {
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  const out = c.getContext("2d"), R = rng(seed);
+  const layer = document.createElement("canvas"); layer.width = w; layer.height = h;
+  const x = layer.getContext("2d");                          // alles hierhin, danach einmal weich uebertragen
+  x.clearRect(0, 0, w, h);
+  // weiche Tuscheflaechen (verwaschene Blaetter im Hintergrund)
+  for (let i = 0; i < 5; i++) {
+    const cx = w * (0.1 + 0.8 * R()), cy = h * (0.15 + 0.7 * R()), r = cell * (0.8 + 1.6 * R());
+    const g = x.createRadialGradient(cx, cy, 0, cx, cy, r);
+    g.addColorStop(0, "rgba(38,34,30,0.22)"); g.addColorStop(1, "rgba(38,34,30,0)");
+    x.fillStyle = g; x.beginPath(); x.ellipse(cx, cy, r * 1.4, r * 0.8, R() * 3, 0, 7); x.fill();
+  }
+  // Ast: gekruemmter, sich verjuengender Tuschestrich, mit Seitenzweigen
+  const tips = [];
+  function branch(x0, y0, ang, len, width, depth) {
+    let px = x0, py = y0, a = ang;
+    const steps = 40, pts = [];
+    for (let s = 0; s <= steps; s++) {                       // Pfad mit leichten Knicken
+      pts.push([px, py, width * Math.pow(1 - s / steps, 0.8) * (0.8 + 0.4 * R())]);
+      a += (R() - 0.5) * 0.22 + (R() < 0.06 ? (R() - 0.5) * 0.8 : 0);
+      px += Math.cos(a) * len / steps; py += Math.sin(a) * len / steps;
+    }
+    x.save();
+    for (let bristle = 0; bristle < 7; bristle++) {           // Borsten: versetzte duenne Striche = trockener Pinsel
+      const off = (bristle / 6 - 0.5), alpha = 0.18 + 0.22 * R();
+      x.strokeStyle = `rgba(26,22,20,${alpha})`; x.lineCap = "round";
+      for (let i = 1; i < pts.length; i++) {
+        if (R() < 0.06) continue;                            // Luecken (Pinsel setzt aus)
+        const [ax, ay, aw] = pts[i - 1], [bx, by, bw] = pts[i];
+        const nx = -(by - ay), ny = bx - ax, nl = Math.hypot(nx, ny) || 1;
+        x.lineWidth = Math.max(0.6, aw * 0.28);
+        x.beginPath(); x.moveTo(ax + nx / nl * off * aw, ay + ny / nl * off * aw);
+        x.lineTo(bx + nx / nl * off * bw, by + ny / nl * off * bw); x.stroke();
+      }
+    }
+    x.restore();
+    for (let i = 8; i < pts.length - 4; i++)                 // Seitenzweige
+      if (depth > 0 && R() < 0.07) branch(pts[i][0], pts[i][1], a + (R() < 0.5 ? -1 : 1) * (0.5 + 0.6 * R()), len * 0.4, pts[i][2] * 0.6, depth - 1);
+    tips.push([pts[pts.length - 1][0], pts[pts.length - 1][1]]);
+  }
+  const fromLeft = R() < 0.5;
+  branch(fromLeft ? -cell * 0.3 : w + cell * 0.3, h * (0.35 + 0.4 * R()), fromLeft ? -0.25 : Math.PI + 0.25, w * 0.62, cell * 0.10, 2);
+  // Ahornblaetter: rot-orange, halbtransparent, in Buescheln an den Zweigenden
+  function maple(cx, cy, s, rot, col) {
+    x.save(); x.translate(cx, cy); x.rotate(rot); x.beginPath();
+    for (let k = 0; k < 5; k++) {
+      const a0 = -Math.PI / 2 + (k - 2) * 0.62, a1 = a0 + 0.31;
+      const L = s * (k === 2 ? 1 : k === 1 || k === 3 ? 0.9 : 0.6);
+      x.lineTo(Math.cos(a0) * L, Math.sin(a0) * L); x.lineTo(Math.cos(a1) * s * 0.35, Math.sin(a1) * s * 0.35);
+    }
+    x.lineTo(0, s * 0.25); x.closePath();
+    x.fillStyle = col; x.fill(); x.restore();
+  }
+  for (const [tx, ty] of tips) {
+    const n = 4 + Math.floor(R() * 7);
+    for (let i = 0; i < n; i++) {
+      const hue = R() < 0.7 ? `rgba(${200 + 40 * R() | 0},${60 + 50 * R() | 0},${35 + 20 * R() | 0},${0.30 + 0.25 * R()})`
+                            : `rgba(120,70,40,${0.25 + 0.2 * R()})`;
+      maple(tx + (R() - 0.5) * cell * 1.2, ty + (R() - 0.5) * cell * 1.0, cell * (0.12 + 0.12 * R()), R() * 6.3, hue);
+    }
+  }
+  // Signatur-Stempel (kleines rotes Siegel) unten in einer Ecke
+  x.fillStyle = "rgba(170,40,30,0.55)";
+  const sx = fromLeft ? w - cell * 0.9 : cell * 0.6, sy = h - cell * 1.1;
+  x.fillRect(sx, sy, cell * 0.18, cell * 0.24);
+  // Tusche verlaeuft leicht ins Papier: Ebene einmal weich uebertragen + scharf darueber (Kern bleibt lesbar)
+  out.filter = "blur(" + Math.max(1, cell * 0.012).toFixed(1) + "px)"; out.drawImage(layer, 0, 0);
+  out.filter = "none"; out.globalAlpha = 0.55; out.drawImage(layer, 0, 0); out.globalAlpha = 1;
+  // Tusche -> Absorption: rgb = durchgelassene Farbe, a = Deckkraft
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, inkTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+}
 
 let COLS, cell, bright, kelv, energy, pix, started = false;
 function layout() {
   const dpr = Math.min(devicePixelRatio || 1, 2);
   cv.width = Math.round(innerWidth * dpr); cv.height = Math.round(innerHeight * dpr);
   gl.viewport(0, 0, cv.width, cv.height);
-  // nur ganze Quadrate: ROWS Reihen, so viele ganze Spalten wie passen; Rest wird gleichmaessiger Rahmen
-  const minMargin = Math.round(cv.height * 0.012);
+  const minMargin = Math.round(cv.height * 0.03);                 // Lackrahmen
   cell = Math.floor((cv.height - 2 * minMargin) / ROWS);
   COLS = Math.max(1, Math.floor((cv.width - 2 * minMargin) / cell));
   const ox = Math.round((cv.width - COLS * cell) / 2), oy = Math.round((cv.height - ROWS * cell) / 2);
   gl.uniform2f(U("uGrid"), COLS, ROWS); gl.uniform2f(U("uRes"), cv.width, cv.height);
   gl.uniform1f(U("uCell"), cell); gl.uniform2f(U("uOrigin"), ox, oy);
-  started = false;
   const n = COLS * ROWS;
-  bright = new Float32Array(n).fill(0.2); kelv = new Float32Array(n).fill(2400); energy = new Float32Array(n);
-  pix = new Uint8Array(n * 4);
+  bright = new Float32Array(n); kelv = new Float32Array(n).fill(2300); energy = new Float32Array(n); pix = new Uint8Array(n * 4);
+  started = false;
+  paintInk(cv.width, cv.height, cell);
 }
 
-// ---------------------------------------------------------------- Audio
-let analyser, fbin, bands = new Float32Array(NB), level = 0, bass = 0, bassAvg = 0.1, lastBeat = 0;
+// ---------------------------------------------------------------- Audio (ueber Sekunden gemittelt)
+let analyser, fbin, bands = new Float32Array(NB), level = 0;
 const start = document.getElementById("start"), hud = document.getElementById("hud");
 async function startAudio() {
   if (demo) { start.hidden = true; return; }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
     const ac = new (window.AudioContext || window.webkitAudioContext)(); await ac.resume();
-    analyser = ac.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.55;
+    analyser = ac.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.6;
     ac.createMediaStreamSource(stream).connect(analyser);
     fbin = new Uint8Array(analyser.frequencyBinCount); start.hidden = true;
   } catch (e) {
@@ -172,9 +260,7 @@ let gPeak = 0.1; const floor = new Float32Array(NB).fill(0.02);
 function readAudio(t) {
   const raw = new Float32Array(NB);
   if (demo || !analyser) {
-    const beat = Math.pow(Math.max(0, Math.sin(t * 2 * Math.PI * 1.85)), 10);
-    for (let i = 0; i < NB; i++)
-      raw[i] = beat * (1 - i / NB) * 0.8 + 0.35 * Math.pow(Math.max(0, Math.sin(t * 0.9 - i * 0.55)), 2) + 0.03 * Math.random();
+    for (let i = 0; i < NB; i++) raw[i] = 0.35 + 0.3 * Math.sin(t * 0.4 - i * 0.5) + 0.15 * Math.sin(t * 1.1 + i);
   } else {
     analyser.getByteFrequencyData(fbin);
     const hz = analyser.context.sampleRate / analyser.fftSize;
@@ -192,80 +278,69 @@ function readAudio(t) {
   let sum = 0;
   for (let i = 0; i < NB; i++) {
     const v = Math.min(1, Math.pow(raw[i] / gPeak, 1.3));
-    bands[i] += (v - bands[i]) * (v > bands[i] ? 0.04 : 0.015); sum += bands[i];   // traege: ueber Sekunden gemittelt
+    bands[i] += (v - bands[i]) * (v > bands[i] ? 0.04 : 0.015); sum += bands[i];
   }
   level += (sum / NB - level) * 0.01;
-  bass = (bands[0] + bands[1]) / 2; bassAvg += (bass - bassAvg) * 0.02;
-  if (bass > bassAvg * 1.35 + 0.08 && t - lastBeat > 0.22) { lastBeat = t; return true; }
-  return false;
 }
 
-// ---------------------------------------------------------------- Lichtfeld
-function vnoise(x, y) {   // glattes Wertrauschen fuer das langsam fliessende Grundfeld
+// ---------------------------------------------------------------- Feld je Kumiko-Feld (sanft) + zwei Lichtquellen
+function vnoise(x, y) {
   const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
   const h = (a, b) => { const s = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return s - Math.floor(s); };
   const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
   return (h(xi, yi) * (1 - u) + h(xi + 1, yi) * u) * (1 - v) + (h(xi, yi + 1) * (1 - u) + h(xi + 1, yi + 1) * u) * v;
 }
-const ripples = [];
 let flow = 0;
-function update(t, dt, beat) {
-  flow += dt * (0.035 + 0.06 * level);                // langsames Fliessen, Musik beschleunigt nur leicht
-  if (beat && mode === "wellen") ripples.push({ x: Math.random() * COLS, y: Math.random() * ROWS, t0: t, s: 0.35 + 0.4 * bass });
-  while (ripples.length && t - ripples[0].t0 > 6) ripples.shift();
+function update(t, dt) {
+  flow += dt * (0.03 + 0.05 * level);
   for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
-    const i = r * COLS + c;
-    const b = bands[Math.min(NB - 1, Math.floor((c / COLS) * NB))];   // Spalte -> Band (links tief, rechts hoch)
+    const i = r * COLS + c, b = bands[Math.min(NB - 1, Math.floor((c / COLS) * NB))];
     let target, k;
     if (mode === "glut") {
-      // Energie steigt von unten auf und verglimmt (wie Glut)
       const below = r > 0 ? energy[i - COLS] : b * 1.2;
       energy[i] += (below * 0.97 - energy[i]) * 0.025;
-      target = 0.02 + 0.98 * Math.pow(Math.min(1, energy[i]), 1.4);
-      k = 1800 + 3200 * Math.min(1, energy[i]) * (0.4 + 0.6 * c / COLS);
+      target = 0.25 + 0.75 * Math.min(1, energy[i]); k = 1800 + 1800 * Math.min(1, energy[i]);
     } else {
-      // feld: fliessendes Grundfeld wie im Render, Ton hebt Kontrast und Helligkeit
       const base = vnoise(c * 0.35 + flow, r * 0.45 - flow * 0.6) * 0.65 + vnoise(c * 0.9 - flow * 1.3, r * 0.9 + 3) * 0.35;
-      const lift = mode === "wellen" ? 0.3 : 0.3 + 0.7 * level;
-      const sp = Math.min(1, Math.max(0, (base - 0.28) / 0.44));          // Kontrast spreizen: dunkle und helle Boxen
-      const shaped = sp * sp * (3 - 2 * sp);
-      target = 0.015 + Math.pow(shaped, 1.3) * (0.75 + 0.45 * lift) + 0.2 * b * (mode === "feld" ? 1 : 0.3);
-      k = 2000 + 2600 * b + 600 * base;
+      target = 0.35 + 0.45 * base + (mode === "feld" ? 0.3 * b : 0.1 * b);
+      k = 2000 + 1500 * b + 500 * base;
     }
-    for (const rp of ripples) {                        // Beat-Wellen: heller, kuehler Ring laeuft nach aussen
-      const age = t - rp.t0, d = Math.hypot(c + 0.5 - rp.x, r + 0.5 - rp.y);
-      const ring = Math.exp(-Math.pow(d - age * 1.6, 2) / 2.5) * Math.exp(-age * 0.8) * rp.s;
-      target += ring; k += ring * 2500;
-    }
-    target = Math.min(1, target);
-    const kk = Math.max(K_MIN, Math.min(K_MAX, k));
-    if (!started) { bright[i] = target; kelv[i] = kk; }                     // Start: sofort im Endzustand
-    bright[i] += (target - bright[i]) * (target > bright[i] ? 0.03 : 0.018);   // danach ein-/ausblenden ueber Sekunden
-    kelv[i] += (kk - kelv[i]) * 0.01;
+    target = Math.min(1, target); k = Math.max(K_MIN, Math.min(K_MAX, k));
+    if (!started) { bright[i] = target; kelv[i] = k; }
+    bright[i] += (target - bright[i]) * (target > bright[i] ? 0.03 : 0.018);
+    kelv[i] += (k - kelv[i]) * 0.01;
     const [R, G, B] = kelvinRGB(kelv[i]), br = Math.sqrt(bright[i]);
     pix[i * 4] = 255 * Math.sqrt(R) * br; pix[i * 4 + 1] = 255 * Math.sqrt(G) * br; pix[i * 4 + 2] = 255 * Math.sqrt(B) * br; pix[i * 4 + 3] = 255;
   }
   started = true;
+  // Lichtquellen (wie Gluehbirnen hinter dem Papier): wandern kaum, atmen mit der Lautstaerke
+  const W = cv.width, H = cv.height, s = 0.85 + 0.35 * level + (mode === "wellen" ? 0.12 * Math.sin(t * 0.6) : 0);
+  gl.uniform4f(U("uLamp0"), W * (0.46 + 0.05 * Math.sin(t * 0.05)), H * (0.50 + 0.04 * Math.cos(t * 0.04)), H * 0.48, 1.6 * s);
+  gl.uniform4f(U("uLamp1"), W * (0.60 + 0.06 * Math.sin(t * 0.037 + 2)), H * (0.44 + 0.05 * Math.sin(t * 0.03)), H * 0.26, 0.7 * s);
 }
 
 // ---------------------------------------------------------------- Schleife + Bedienung
 let last = performance.now(), T = 0, hudTimer;
 function loop(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now; T += dt;
-  const beat = readAudio(T); update(T, dt, beat);
+  readAudio(T); update(T, dt);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, dataTex);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, COLS, ROWS, 0, gl.RGBA, gl.UNSIGNED_BYTE, pix);
-  gl.uniform1f(U("uTime"), T);
+  gl.uniform1f(U("uTime"), T); gl.uniform1f(U("uPaint"), paint);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   requestAnimationFrame(loop);
 }
 function showHud() {
-  hud.innerHTML = `<b>${{ feld: "Feld", glut: "Glut", wellen: "Wellen" }[mode]}</b> · <kbd>1</kbd> Feld <kbd>2</kbd> Glut <kbd>3</kbd> Wellen · <kbd>D</kbd> ${demo ? "Mikrofon" : "Demo"}`;
+  hud.innerHTML = `<b>${{ feld: "Feld", glut: "Glut", wellen: "Atem" }[mode]}</b> · <kbd>1</kbd> Feld <kbd>2</kbd> Glut <kbd>3</kbd> Atem · <kbd>M</kbd> Malerei ${paint ? "aus" : "an"} · <kbd>N</kbd> neue Malerei · <kbd>D</kbd> ${demo ? "Mikrofon" : "Demo"}`;
   document.body.classList.add("show-hud"); clearTimeout(hudTimer);
   hudTimer = setTimeout(() => document.body.classList.remove("show-hud"), 2500);
 }
 addEventListener("keydown", e => {
-  if (e.key === "1") mode = "feld"; else if (e.key === "2") mode = "glut"; else if (e.key === "3") mode = "wellen";
-  else if (e.key === "d" || e.key === "D") { demo = !demo; if (!demo && !analyser) startAudio(); }
+  const k = e.key.toLowerCase();
+  if (k === "1") mode = "feld"; else if (k === "2") mode = "glut"; else if (k === "3") mode = "wellen";
+  else if (k === "m") paint = paint ? 0 : 1;
+  else if (k === "n") { seed = Math.floor(Math.random() * 1e6); paintInk(cv.width, cv.height, cell); }
+  else if (k === "d") { demo = !demo; if (!demo && !analyser) startAudio(); }
   else return;
   showHud();
 });
