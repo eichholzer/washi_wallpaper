@@ -31,11 +31,19 @@ URL-Parameter: `?reihen=8` (Zellengrösse), `?demo=1`, `?stress=0.6` (Lärmbelas
 Mit [Plash](https://sindresorhus.com/plash) die URL `http://localhost:8765/index.html` als Hintergrund
 setzen. Ob Plash das Mikrofon freigibt, hängt von Plash ab; sonst `&demo=1` anhängen.
 
+## Als Bildschirmschoner (Ersatz für den Sperrbildschirm)
+
+macOS lässt keine Webseite als Sperrbildschirm zu. Mit [WebViewScreenSaver](https://github.com/liquidx/webviewscreensaver)
+(nach `~/Library/Screen Savers`) zeigt der Bildschirmschoner `screensaver.html`; mit „Passwort nach Beginn des
+Bildschirmschoners“ wirkt er wie ein Sperrbildschirm. Im Schoner gibt es kein Mikrofon, darum läuft diese Variante
+mit dem Demo-Ton. Einstellung: Systemeinstellungen → Bildschirmschoner → WebViewScreenSaver (URL ist vorkonfiguriert).
+
 ## Dateien
 
 - `index.html`: die Seite (WebGL-Shader für Papier und Licht, Web Audio für das Spektrum)
 - `index_laterne.html` + `assets/`: Variante aus dem Foto einer echten Andon-Laterne mit Sprachbefehlen
   (Wind, Regen, Nacht, Licht, Schnee, Schmetterling, Wanderer, Hallo, Ruhe); öffnen über `http://localhost:8765/index_laterne.html`
 - `index_andon.html`, `index_wanderer_v1.html`: weitere prozedurale Varianten
+- `screensaver.html`: Variante für den Bildschirmschoner (Demo-Ton, ohne Mikrofon)
 - `start.sh`: lokaler Server + Vollbild
 - `wled_palette_washi_wwa.json`: dieselbe Farbskala als WLED-Palette (als `palette0.json` über `http://<IP>/edit` hochladen)
