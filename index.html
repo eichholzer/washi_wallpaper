@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Washi Klang</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #120d08; overflow: hidden; cursor: none; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; left: 18px; bottom: 16px; font: 12px/1.6 -apple-system, "Helvetica Neue", sans-serif;
+         color: #d8c6a8; text-shadow: 0 1px 3px #000; opacity: 0; transition: opacity .8s; pointer-events: none; }
+  body.show-hud #hud { opacity: .9; }
+  kbd { border: 1px solid rgba(216,198,168,.5); padding: 0 5px; border-radius: 3px; }
+  #start { position: fixed; inset: 0; display: grid; place-items: center; font: 15px -apple-system, sans-serif;
+           color: #efe2cb; background: rgba(18,13,8,.35); cursor: pointer; text-shadow: 0 1px 4px #000; }
+  #start[hidden] { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="start">Klicken, um das Mikrofon zu starten</div>
+<div id="hud"></div>
+<script id="fs" type="x-shader/x-fragment">
+precision highp float;
+uniform sampler2D uData;      // je Box: rgb = Lichtfarbe * Helligkeit
+uniform vec2 uGrid;           // Spalten, Reihen
+uniform vec2 uRes;
+uniform float uCell;          // Boxgroesse in Pixeln
+uniform vec2 uOrigin;
+uniform float uTime;
+
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float noise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
+}
+float fbm(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { s += a * noise(p); p *= 2.03; a *= 0.5; } return s; }
+
+vec3 cellLight(vec2 id) {
+  vec2 uv = (clamp(id, vec2(0.0), uGrid - 1.0) + 0.5) / uGrid;
+  vec3 c = texture2D(uData, uv).rgb;
+  return c * c;               // Texturwerte sind gamma-kodiert
+}
+
+void main() {
+  vec2 p = (gl_FragCoord.xy - uOrigin) / uCell;          // in Boxen
+  if (p.x < 0.0 || p.y < 0.0 || p.x >= uGrid.x || p.y >= uGrid.y) {   // Rand = dunkler Rahmen
+    float g = fbm(gl_FragCoord.xy / uCell * vec2(1.5, 12.0));
+    gl_FragColor = vec4(vec3(0.075, 0.058, 0.043) * (0.85 + 0.3 * g), 1.0);
+    return;
+  }
+  vec2 id = floor(p), f = fract(p);
+  vec3 L = cellLight(id);
+
+  // Licht hinter Diffusor + Washi: fast gleichmaessig, Mitte leicht heller, weicher Abfall zu den Stegen.
+  // Getrennt in x und y berechnet (keine Diagonalen / kein Stern).
+  float fx = smoothstep(0.0, 0.5, min(f.x, 1.0 - f.x));
+  float fy = smoothstep(0.0, 0.5, min(f.y, 1.0 - f.y));
+  float prof = (0.70 + 0.30 * fx) * (0.70 + 0.30 * fy);
+
+  // wenig Streulicht ueber den Steg, ebenfalls getrennt je Richtung
+  float ex = min(f.x, 1.0 - f.x), ey = min(f.y, 1.0 - f.y);
+  vec3 nx = cellLight(id + vec2(f.x < 0.5 ? -1.0 : 1.0, 0.0));
+  vec3 ny = cellLight(id + vec2(0.0, f.y < 0.5 ? -1.0 : 1.0));
+  vec3 light = L * prof + 0.12 * nx * exp(-ex / 0.05) + 0.12 * ny * exp(-ey / 0.05);
+
+  // Washi: lange Kozo-Fasern, Wolken (ungleichmaessige Papierdicke), feines Korn
+  vec2 q = gl_FragCoord.xy / uCell;
+  float fib = fbm(vec2(q.x * 2.2, q.y * 26.0) + 3.1);
+  float fib2 = fbm(vec2(q.x * 30.0, q.y * 2.6) + 9.4);    // einzelne Querfasern
+  float cloud = fbm(q * 1.3 + 7.3);
+  float grain = hash(floor(gl_FragCoord.xy));
+  float paper = 0.78 + 0.26 * cloud + 0.14 * (fib - 0.5) + 0.06 * (fib2 - 0.5) + 0.03 * (grain - 0.5);
+
+  // Patina: grossflaechige Vergilbung, leichte Flecken, dunklere Leimspuren entlang der Stege
+  float age = fbm(q * 0.35 + 21.7);
+  float stain = smoothstep(0.62, 0.78, fbm(q * 0.9 + 4.2));
+  float glue = exp(-min(ex, ey) / 0.04) * 0.10;
+  vec3 tint = mix(vec3(1.0, 0.93, 0.81), vec3(0.96, 0.84, 0.62), age);
+  tint *= 1.0 - 0.10 * stain - glue;
+
+  vec3 col = light * tint * paper;
+  float lum = dot(col, vec3(0.3, 0.55, 0.15));
+  col = mix(vec3(lum), col, 0.78);
+  col += vec3(0.012, 0.008, 0.004) * paper * tint;       // Restlicht: tiefbraunes Glimmen
+
+  float edge = min(ex, ey);
+  col *= mix(0.10, 1.0, smoothstep(0.010, 0.026, edge)); // Steg-Linie
+  col = 1.0 - exp(-col * 1.9);                           // weiche Lichter
+  vec2 v = gl_FragCoord.xy / uRes - 0.5;
+  col *= 1.0 - 0.30 * dot(v, v);                         // leichte Vignette
+  gl_FragColor = vec4(sqrt(max(col, 0.0)), 1.0);
+}
+</script>
+<script>
+"use strict";
+// ---------------------------------------------------------------- Einstellungen (URL: ?modus=glut&reihen=8&demo=1)
+const q = new URLSearchParams(location.search);
+let mode = q.get("modus") || "feld";          // feld | glut | wellen
+const ROWS = +(q.get("reihen") || 8);
+let demo = q.get("demo") === "1";
+const NB = 10;                                // Frequenzbaender
+const K_MIN = 1800, K_MAX = 6500;             // WWA: Amber -> Kaltweiss
+
+function kelvinRGB(k) {
+  const t = k / 100; let r, g, b;
+  r = t <= 66 ? 255 : 329.698727446 * Math.pow(t - 60, -0.1332047592);
+  g = t <= 66 ? 99.4708025861 * Math.log(t) - 161.1195681661 : 288.1221695283 * Math.pow(t - 60, -0.0755148492);
+  b = t >= 66 ? 255 : t <= 19 ? 0 : 138.5177312231 * Math.log(t - 10) - 305.0447927307;
+  return [r, g, b].map(v => Math.max(0, Math.min(255, v)) / 255);
+}
+
+// ---------------------------------------------------------------- WebGL
+const cv = document.getElementById("c");
+const gl = cv.getContext("webgl", { antialias: false, premultipliedAlpha: false });
+function shader(type, src) {
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, shader(gl.VERTEX_SHADER, "attribute vec2 a;void main(){gl_Position=vec4(a,0.,1.);}"));
+gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, document.getElementById("fs").textContent));
+gl.linkProgram(prog); gl.useProgram(prog);
+const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+const aLoc = gl.getAttribLocation(prog, "a"); gl.enableVertexAttribArray(aLoc); gl.vertexAttribPointer(aLoc, 2, gl.FLOAT, false, 0, 0);
+const U = n => gl.getUniformLocation(prog, n);
+const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+let COLS, cell, bright, kelv, energy, pix, started = false;
+function layout() {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  cv.width = Math.round(innerWidth * dpr); cv.height = Math.round(innerHeight * dpr);
+  gl.viewport(0, 0, cv.width, cv.height);
+  // nur ganze Quadrate: ROWS Reihen, so viele ganze Spalten wie passen; Rest wird gleichmaessiger Rahmen
+  const minMargin = Math.round(cv.height * 0.012);
+  cell = Math.floor((cv.height - 2 * minMargin) / ROWS);
+  COLS = Math.max(1, Math.floor((cv.width - 2 * minMargin) / cell));
+  const ox = Math.round((cv.width - COLS * cell) / 2), oy = Math.round((cv.height - ROWS * cell) / 2);
+  gl.uniform2f(U("uGrid"), COLS, ROWS); gl.uniform2f(U("uRes"), cv.width, cv.height);
+  gl.uniform1f(U("uCell"), cell); gl.uniform2f(U("uOrigin"), ox, oy);
+  started = false;
+  const n = COLS * ROWS;
+  bright = new Float32Array(n).fill(0.2); kelv = new Float32Array(n).fill(2400); energy = new Float32Array(n);
+  pix = new Uint8Array(n * 4);
+}
+
+// ---------------------------------------------------------------- Audio
+let analyser, fbin, bands = new Float32Array(NB), level = 0, bass = 0, bassAvg = 0.1, lastBeat = 0;
+const start = document.getElementById("start"), hud = document.getElementById("hud");
+async function startAudio() {
+  if (demo) { start.hidden = true; return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    const ac = new (window.AudioContext || window.webkitAudioContext)(); await ac.resume();
+    analyser = ac.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.55;
+    ac.createMediaStreamSource(stream).connect(analyser);
+    fbin = new Uint8Array(analyser.frequencyBinCount); start.hidden = true;
+  } catch (e) {
+    start.textContent = "Kein Mikrofon (" + e.name + ") – Demo läuft. Taste D wechselt.";
+    demo = true; setTimeout(() => (start.hidden = true), 3000);
+  }
+}
+start.addEventListener("click", startAudio);
+startAudio();
+const edges = []; for (let i = 0; i <= NB; i++) edges.push(40 * Math.pow(12000 / 40, i / NB));
+let gPeak = 0.1; const floor = new Float32Array(NB).fill(0.02);
+function readAudio(t) {
+  const raw = new Float32Array(NB);
+  if (demo || !analyser) {
+    const beat = Math.pow(Math.max(0, Math.sin(t * 2 * Math.PI * 1.85)), 10);
+    for (let i = 0; i < NB; i++)
+      raw[i] = beat * (1 - i / NB) * 0.8 + 0.35 * Math.pow(Math.max(0, Math.sin(t * 0.9 - i * 0.55)), 2) + 0.03 * Math.random();
+  } else {
+    analyser.getByteFrequencyData(fbin);
+    const hz = analyser.context.sampleRate / analyser.fftSize;
+    for (let i = 0; i < NB; i++) {
+      const a = Math.max(1, Math.floor(edges[i] / hz)), b = Math.max(a + 1, Math.floor(edges[i + 1] / hz));
+      let s = 0; for (let k = a; k < b; k++) s += fbin[k]; raw[i] = s / (b - a) / 255;
+    }
+  }
+  let mx = 0;
+  for (let i = 0; i < NB; i++) {
+    floor[i] += (raw[i] - floor[i]) * (raw[i] < floor[i] ? 0.2 : 0.0015);
+    raw[i] = Math.max(0, raw[i] - floor[i] * 1.2); mx = Math.max(mx, raw[i]);
+  }
+  gPeak = Math.max(mx, gPeak * 0.998, 0.04);
+  let sum = 0;
+  for (let i = 0; i < NB; i++) {
+    const v = Math.min(1, Math.pow(raw[i] / gPeak, 1.3));
+    bands[i] += (v - bands[i]) * (v > bands[i] ? 0.04 : 0.015); sum += bands[i];   // traege: ueber Sekunden gemittelt
+  }
+  level += (sum / NB - level) * 0.01;
+  bass = (bands[0] + bands[1]) / 2; bassAvg += (bass - bassAvg) * 0.02;
+  if (bass > bassAvg * 1.35 + 0.08 && t - lastBeat > 0.22) { lastBeat = t; return true; }
+  return false;
+}
+
+// ---------------------------------------------------------------- Lichtfeld
+function vnoise(x, y) {   // glattes Wertrauschen fuer das langsam fliessende Grundfeld
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+  const h = (a, b) => { const s = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return s - Math.floor(s); };
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  return (h(xi, yi) * (1 - u) + h(xi + 1, yi) * u) * (1 - v) + (h(xi, yi + 1) * (1 - u) + h(xi + 1, yi + 1) * u) * v;
+}
+const ripples = [];
+let flow = 0;
+function update(t, dt, beat) {
+  flow += dt * (0.035 + 0.06 * level);                // langsames Fliessen, Musik beschleunigt nur leicht
+  if (beat && mode === "wellen") ripples.push({ x: Math.random() * COLS, y: Math.random() * ROWS, t0: t, s: 0.35 + 0.4 * bass });
+  while (ripples.length && t - ripples[0].t0 > 6) ripples.shift();
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const i = r * COLS + c;
+    const b = bands[Math.min(NB - 1, Math.floor((c / COLS) * NB))];   // Spalte -> Band (links tief, rechts hoch)
+    let target, k;
+    if (mode === "glut") {
+      // Energie steigt von unten auf und verglimmt (wie Glut)
+      const below = r > 0 ? energy[i - COLS] : b * 1.2;
+      energy[i] += (below * 0.97 - energy[i]) * 0.025;
+      target = 0.02 + 0.98 * Math.pow(Math.min(1, energy[i]), 1.4);
+      k = 1800 + 3200 * Math.min(1, energy[i]) * (0.4 + 0.6 * c / COLS);
+    } else {
+      // feld: fliessendes Grundfeld wie im Render, Ton hebt Kontrast und Helligkeit
+      const base = vnoise(c * 0.35 + flow, r * 0.45 - flow * 0.6) * 0.65 + vnoise(c * 0.9 - flow * 1.3, r * 0.9 + 3) * 0.35;
+      const lift = mode === "wellen" ? 0.3 : 0.3 + 0.7 * level;
+      const sp = Math.min(1, Math.max(0, (base - 0.28) / 0.44));          // Kontrast spreizen: dunkle und helle Boxen
+      const shaped = sp * sp * (3 - 2 * sp);
+      target = 0.015 + Math.pow(shaped, 1.3) * (0.75 + 0.45 * lift) + 0.2 * b * (mode === "feld" ? 1 : 0.3);
+      k = 2000 + 2600 * b + 600 * base;
+    }
+    for (const rp of ripples) {                        // Beat-Wellen: heller, kuehler Ring laeuft nach aussen
+      const age = t - rp.t0, d = Math.hypot(c + 0.5 - rp.x, r + 0.5 - rp.y);
+      const ring = Math.exp(-Math.pow(d - age * 1.6, 2) / 2.5) * Math.exp(-age * 0.8) * rp.s;
+      target += ring; k += ring * 2500;
+    }
+    target = Math.min(1, target);
+    const kk = Math.max(K_MIN, Math.min(K_MAX, k));
+    if (!started) { bright[i] = target; kelv[i] = kk; }                     // Start: sofort im Endzustand
+    bright[i] += (target - bright[i]) * (target > bright[i] ? 0.03 : 0.018);   // danach ein-/ausblenden ueber Sekunden
+    kelv[i] += (kk - kelv[i]) * 0.01;
+    const [R, G, B] = kelvinRGB(kelv[i]), br = Math.sqrt(bright[i]);
+    pix[i * 4] = 255 * Math.sqrt(R) * br; pix[i * 4 + 1] = 255 * Math.sqrt(G) * br; pix[i * 4 + 2] = 255 * Math.sqrt(B) * br; pix[i * 4 + 3] = 255;
+  }
+  started = true;
+}
+
+// ---------------------------------------------------------------- Schleife + Bedienung
+let last = performance.now(), T = 0, hudTimer;
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now; T += dt;
+  const beat = readAudio(T); update(T, dt, beat);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, COLS, ROWS, 0, gl.RGBA, gl.UNSIGNED_BYTE, pix);
+  gl.uniform1f(U("uTime"), T);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  requestAnimationFrame(loop);
+}
+function showHud() {
+  hud.innerHTML = `<b>${{ feld: "Feld", glut: "Glut", wellen: "Wellen" }[mode]}</b> · <kbd>1</kbd> Feld <kbd>2</kbd> Glut <kbd>3</kbd> Wellen · <kbd>D</kbd> ${demo ? "Mikrofon" : "Demo"}`;
+  document.body.classList.add("show-hud"); clearTimeout(hudTimer);
+  hudTimer = setTimeout(() => document.body.classList.remove("show-hud"), 2500);
+}
+addEventListener("keydown", e => {
+  if (e.key === "1") mode = "feld"; else if (e.key === "2") mode = "glut"; else if (e.key === "3") mode = "wellen";
+  else if (e.key === "d" || e.key === "D") { demo = !demo; if (!demo && !analyser) startAudio(); }
+  else return;
+  showHud();
+});
+addEventListener("mousemove", showHud);
+addEventListener("resize", layout);
+layout(); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
