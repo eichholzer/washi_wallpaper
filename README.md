@@ -4,8 +4,8 @@ Ein ruhiger, audioreaktiver Bildschirmhintergrund: ein Raster aus Leuchtboxen hi
 LED-Lichtbild mit SK6812-LEDs. Das Licht fliesst langsam und reagiert gemittelt über Sekunden auf das Mikrofon.
 Die Farben bleiben im Bereich, den WWA-LEDs darstellen können (Amber 1800 K bis Kaltweiss 6500 K).
 
-Ein einziger Modus: Wird nicht gesprochen, wird das Bild über fünf Minuten stetig dunkler, bis fast nichts mehr zu
-sehen ist. Sobald jemand spricht, wacht es innert Sekunden wieder auf; die Stimme hebt zusätzlich Helligkeit und Kontrast. Anhaltender Lärm belastet die LEDs: Einzelne Boxen
+Ein einziger Modus: Bei Stille ist das Bild gedämmt (etwa ein Fünftel des Lichts), sobald jemand spricht, hebt sich
+das Licht über einige Sekunden und sinkt danach langsam zurück. Anhaltender Lärm belastet die LEDs: Einzelne Boxen
 fallen aus, werden dunkel und zucken kalt; sie erholen sich erst, wenn es wieder ruhig ist. Das Raster füllt den
 ganzen Bildschirm mit ganzen, fast quadratischen Zellen.
 ## Starten
@@ -24,7 +24,7 @@ Seite im Vollbild in Chrome. Ohne Chrome öffnet sie im Standardbrowser.
 |---|---|
 | `D` | Demo-Audio ↔ Mikrofon |
 
-URL-Parameter: `?reihen=8` (Zellengrösse), `?minuten=5` (Zeit bis dunkel), `?demo=1`, `?stille=1&stilleSek=200` (Stille testen), `?stress=0.6` (Lärmbelastung vorgeben, zum Testen), `?mic=teams` (anderes Mikrofon; Standard ist das eingebaute des Macs).
+URL-Parameter: `?reihen=8` (Zellengrösse), `?demo=1`, `?stress=0.6` (Lärmbelastung vorgeben, zum Testen), `?mic=teams` (anderes Mikrofon; Standard ist das eingebaute des Macs).
 
 ## Als Desktop-Hintergrund (macOS)
 

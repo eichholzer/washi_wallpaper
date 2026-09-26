@@ -100,9 +100,6 @@ void main() {
 const q = new URLSearchParams(location.search);
 let voice = 0;                                // Stimme, ueber Sekunden gemittelt (0 = Stille)
 let stress = +(q.get("stress") || 0);          // Laermbelastung: waechst bei anhaltend lautem Ton, sinkt langsam
-const QUIET_MIN = +(q.get("minuten") || 5);    // Minuten Stille, bis das Bild ganz dunkel ist
-let quietT = +(q.get("stilleSek") || 0);       // Sekunden seit dem letzten Sprechen
-let awake = 1;                                 // 1 = wach (hell), 0 = eingeschlafen (dunkel)
 let defect;                                    // je Box: Restzeit des Ausfalls in Sekunden (0 = intakt)
 const ROWS = +(q.get("reihen") || 8);
 let demo = q.get("demo") === "1";
@@ -199,7 +196,7 @@ function readAudio(t) {
       let s = 0; for (let k = a; k < b; k++) s += fbin[k]; raw[i] = s / (b - a) / 255;
     }
   }
-  if (q.get("stille")) raw.fill(0);                 // Test: absolute Stille (mit ?stilleSek=… Startwert)
+  if (q.get("stille")) raw.fill(0);                 // Test: absolute Stille
   let mx = 0;
   for (let i = 0; i < NB; i++) {
     floor[i] += (raw[i] - floor[i]) * (raw[i] < floor[i] ? 0.2 : 0.0015);
@@ -229,10 +226,6 @@ const ripples = [];
 let flow = 0;
 function update(t, dt, beat) {
   voice += (Math.min(1, level * 1.6) - voice) * (level > voice ? 0.02 : 0.006);   // hebt sich schnell, sinkt langsam
-  // Einschlafen: wird nicht gesprochen, wird es ueber QUIET_MIN Minuten stetig dunkler; Sprechen weckt in Sekunden
-  if (levelFast > 0.18) quietT = Math.max(0, quietT - dt * 100); else quietT += dt;   // 3 s Sprechen weckt aus 5 min Stille
-  const targetAwake = Math.max(0, 1 - quietT / (QUIET_MIN * 60));
-  awake += (targetAwake - awake) * (targetAwake > awake ? 0.03 : 0.2);
   // Laerm: anhaltend laute Pegel (> 0.55) laden die Belastung auf, Ruhe baut sie ueber ~1 Minute ab
   stress = Math.max(0, Math.min(1, stress + dt * (Math.max(0, levelFast - 0.55) * 0.12 - 0.018)));
   // ab einer gewissen Belastung fallen einzelne Boxen aus, umso mehr, je laenger es laut bleibt
@@ -248,7 +241,7 @@ function update(t, dt, beat) {
     const base = vnoise(c * 0.35 + flow, r * 0.45 - flow * 0.6) * 0.65 + vnoise(c * 0.9 - flow * 1.3, r * 0.9 + 3) * 0.35;
     const sp = Math.min(1, Math.max(0, (base - 0.28) / 0.44));
     const shaped = sp * sp * (3 - 2 * sp);
-    const dim = 0.35 + 0.65 * Math.max(voice, awake);   // Feldkontrast; die Gesamthelligkeit regelt uGlob im Shader
+    const dim = 0.15 + 0.85 * voice;                    // Feldkontrast bleibt; die Gesamthelligkeit regelt uGlob im Shader
     let target = (0.02 + Math.pow(shaped, 1.3) * 0.9 + 0.2 * b * voice) * dim;
     let k = 2000 + 2000 * b * voice + 500 * base;
     if (defect[i] > 0) {
@@ -275,12 +268,12 @@ function loop(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now; T += dt;
   const beat = readAudio(T); update(T, dt, beat);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, COLS, ROWS, 0, gl.RGBA, gl.UNSIGNED_BYTE, pix);
-  gl.uniform1f(U("uTime"), T); gl.uniform1f(U("uGlob"), 0.015 + 0.985 * Math.pow(Math.max(awake, 0.5 * voice), 1.6));
+  gl.uniform1f(U("uTime"), T); gl.uniform1f(U("uGlob"), 0.03 + 0.97 * Math.pow(voice, 0.7));
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   requestAnimationFrame(loop);
 }
 function showHud() {
-  hud.innerHTML = `Ohne Stimme wird es über ${QUIET_MIN} Minuten dunkel, Sprechen weckt es · ${micName ? "Mikrofon: " + micName + " · " : ""}<kbd>D</kbd> ${demo ? "Mikrofon" : "Demo"}`;
+  hud.innerHTML = `Sprich, und das Licht hebt sich · ${micName ? "Mikrofon: " + micName + " · " : ""}<kbd>D</kbd> ${demo ? "Mikrofon" : "Demo"}`;
   document.body.classList.add("show-hud"); clearTimeout(hudTimer);
   hudTimer = setTimeout(() => document.body.classList.remove("show-hud"), 2500);
 }
