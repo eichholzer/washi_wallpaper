@@ -24,7 +24,7 @@ Seite im Vollbild in Chrome. Ohne Chrome öffnet sie im Standardbrowser.
 |---|---|
 | `D` | Demo-Audio ↔ Mikrofon |
 
-URL-Parameter: `?reihen=8` (Zellengrösse), `?demo=1`, `?stress=0.6` (Lärmbelastung vorgeben, zum Testen).
+URL-Parameter: `?reihen=8` (Zellengrösse), `?demo=1`, `?stress=0.6` (Lärmbelastung vorgeben, zum Testen), `?mic=teams` (anderes Mikrofon; Standard ist das eingebaute des Macs).
 
 ## Als Desktop-Hintergrund (macOS)
 
