@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Washi Wanderer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0e0806; overflow: hidden; cursor: none; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; left: 18px; bottom: 16px; font: 12px/1.6 -apple-system, "Helvetica Neue", sans-serif;
+         color: #e8cfa8; text-shadow: 0 1px 3px #000; opacity: 0; transition: opacity .8s; pointer-events: none; }
+  body.show-hud #hud { opacity: .9; }
+  kbd { border: 1px solid rgba(232,207,168,.5); padding: 0 5px; border-radius: 3px; }
+  #start { position: fixed; inset: 0; display: grid; place-items: center; font: 15px -apple-system, sans-serif;
+           color: #f3e2c6; background: rgba(14,8,6,.35); cursor: pointer; text-shadow: 0 1px 4px #000; }
+  #start[hidden] { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="start">Klicken, um das Mikrofon zu starten</div>
+<div id="hud"></div>
+<script id="fs" type="x-shader/x-fragment">
+precision highp float;
+uniform sampler2D uData;      // je Feld: rgb = Lichtfarbe * Helligkeit (Ton, Muster)
+uniform sampler2D uInk;       // Tusche (Boden, Nebel): rgb = Tuschefarbe, a = Deckkraft
+uniform sampler2D uShadow;    // Schattenfigur hinter dem Papier (a = Dichte, schon weich)
+uniform vec2 uGrid, uRes, uOrigin;
+uniform float uCell, uTime, uPaint, uFlicker;
+uniform vec4 uLamp0, uLamp1;  // Lichtquellen hinter dem Papier: x, y (Pixel), Radius, Staerke
+
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float noise(vec2 p) {
+  vec2 i = floor(p), f = fract(p), u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
+}
+float fbm(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { s += a * noise(p); p *= 2.03; a *= 0.5; } return s; }
+
+vec3 cellLight(vec2 id) {
+  vec2 uv = (clamp(id, vec2(0.0), uGrid - 1.0) + 0.5) / uGrid;
+  vec3 c = texture2D(uData, uv).rgb;
+  return c * c;
+}
+float lamp(vec4 l, vec2 p) { vec2 d = (p - l.xy) / l.z; return l.w * exp(-dot(d, d)); }
+
+void main() {
+  vec2 px = gl_FragCoord.xy;
+  vec2 p = (px - uOrigin) / uCell;
+  vec2 q = px / uCell;
+
+  // Rahmen: dunkler Lack mit weichem Glanz, feine Holzmaserung
+  if (p.x < 0.0 || p.y < 0.0 || p.x >= uGrid.x || p.y >= uGrid.y) {
+    float g = fbm(vec2(q.x * 0.5, q.y * 10.0));
+    float sheen = 0.5 + 0.5 * sin(px.y / uRes.y * 3.1416);
+    vec3 lac = vec3(0.070, 0.040, 0.030) * (0.8 + 0.35 * g) * (0.85 + 0.25 * sheen);
+    gl_FragColor = vec4(lac, 1.0);
+    return;
+  }
+  vec2 id = floor(p), f = fract(p);
+  // Holz ist nie exakt: Stablage schwankt minimal entlang der Laenge
+  vec2 fw = f + vec2(0.006 * (noise(vec2(q.y * 1.3, id.x * 3.1)) - 0.5), 0.006 * (noise(vec2(q.x * 1.3, id.y * 2.7)) - 0.5));
+  float ex = min(fw.x, 1.0 - fw.x), ey = min(fw.y, 1.0 - fw.y);
+
+  // Laternenlicht: grosses, warmes Leuchten aus der Mitte (Lichtquellen hinter dem Papier)
+  float glow = (lamp(uLamp0, px) + lamp(uLamp1, px) + 0.08) * uFlicker;
+  vec3 C = cellLight(id);                                  // Ton / Muster je Feld
+  float cb = dot(C, vec3(0.3, 0.55, 0.15));
+  vec3 ccol = cb > 0.0001 ? C / cb : vec3(1.0);
+  // Glutfarbe: Mitte goldpfirsich, zum Rand rosig/amber
+  vec2 cUV = px / uRes - 0.5;
+  vec3 warm = mix(vec3(1.0, 0.86, 0.62), vec3(0.95, 0.58, 0.46), smoothstep(0.05, 0.55, length(cUV)));   // Kern goldweiss, Rand rosig
+  vec3 light = warm * mix(vec3(1.0), ccol, 0.35) * glow * (0.18 + 1.25 * cb);   // Felder heben sich ab wie im Favorit
+
+  // Washi: Fasern, Wolken, Knitterfalten
+  float fib = fbm(vec2(q.x * 2.4, q.y * 24.0) + 3.1);
+  float fib2 = fbm(vec2(q.x * 26.0, q.y * 2.2) + 9.4);
+  float cloud = fbm(q * 1.2 + 7.3);
+  float cr = abs(noise(q * 0.9 + 2.0) - 0.5) + abs(noise(q * 1.7 + 8.0) - 0.5) * 0.6;
+  float crease = 1.0 - smoothstep(0.0, 0.045, cr);        // feine Knicklinien
+  float paper = 0.80 + 0.26 * cloud + 0.14 * (fib - 0.5) + 0.07 * (fib2 - 0.5) - 0.11 * crease
+              + 0.03 * (hash(floor(px)) - 0.5);
+  vec3 col = light * vec3(1.0, 0.93, 0.83) * paper;
+
+  // Sumi-e: Tusche absorbiert Licht (dunkle Aeste, rote Ahornblaetter, Tuscheflaechen)
+  vec4 ink = texture2D(uInk, px / uRes);
+  col *= mix(vec3(1.0), ink.rgb, ink.a * uPaint);
+
+  // Schatten des Wanderers auf dem Papier (weich, warmbraun statt schwarz)
+  float shd = texture2D(uShadow, px / uRes).a;
+  col *= mix(vec3(1.0), vec3(0.20, 0.13, 0.09), shd * 0.85);
+
+  // Kumiko-Stab: weicher Schatten auf dem Papier (Tiefe), dann dunkler Lackstab
+  float sh = exp(-ex / 0.07) * 0.22 + exp(-ey / 0.07) * 0.22;
+  col *= 1.0 - min(0.4, sh);
+  col += vec3(0.010, 0.005, 0.003) * paper;                // Restglimmen
+  col = 1.0 - exp(-col * 1.8);
+  col = sqrt(max(col, 0.0));
+
+  float wx = 0.019 + 0.004 * (noise(vec2(id.x * 5.3, q.y * 0.6)) - 0.5);
+  float wy = 0.019 + 0.004 * (noise(vec2(q.x * 0.6, id.y * 4.9)) - 0.5);
+  float bar = max(1.0 - smoothstep(wx - 0.009, wx + 0.004, ex), 1.0 - smoothstep(wy - 0.009, wy + 0.004, ey));
+  bar *= 1.0 - 0.35 * smoothstep(0.6, 1.6, glow);         // helles Licht ueberstrahlt die Staebe (wie Auge/Kamera)
+  float bg = fbm(ex < ey ? vec2(q.x * 40.0, q.y * 1.5) : vec2(q.x * 1.5, q.y * 40.0));
+  vec3 lacquer = vec3(0.13, 0.075, 0.050) * (0.7 + 0.5 * bg);     // brauner Lack wie im Favorit
+  lacquer += vec3(0.20, 0.10, 0.06) * glow * 0.12;                // Streiflicht an der Kante
+  col = mix(col, lacquer, bar);
+  // Filmkorn (bewegt) + leichte Vignette: nimmt die digitale Glaette
+  float grain = hash(px * 0.73 + fract(uTime * 7.3) * 91.0) - 0.5;
+  col += grain * 0.028;
+  vec2 v = px / uRes - 0.5;
+  col *= 1.0 - 0.28 * dot(v, v);
+  gl_FragColor = vec4(col, 1.0);
+}
+</script>
+<script>
+"use strict";
+// ---------------------------------------------------------------- Einstellungen (?modus=feld|glut|wellen &reihen=6 &malerei=0 &demo=1 &seed=3)
+const q = new URLSearchParams(location.search);
+let mode = q.get("modus") || "feld";
+const ROWS = +(q.get("reihen") || 6);
+let demo = q.get("demo") === "1";
+let paint = q.get("malerei") === "0" ? 0 : 1;
+let motif = q.get("motiv") || "wanderer";       // wanderer | ast
+let seed = +(q.get("seed") || Math.floor(Math.random() * 1e6));
+const NB = 10, K_MIN = 1800, K_MAX = 4500;     // Laternenlicht: Amber bis warmes Weiss
+
+function kelvinRGB(k) {
+  const t = k / 100; let r, g, b;
+  r = t <= 66 ? 255 : 329.698727446 * Math.pow(t - 60, -0.1332047592);
+  g = t <= 66 ? 99.4708025861 * Math.log(t) - 161.1195681661 : 288.1221695283 * Math.pow(t - 60, -0.0755148492);
+  b = t >= 66 ? 255 : t <= 19 ? 0 : 138.5177312231 * Math.log(t - 10) - 305.0447927307;
+  return [r, g, b].map(v => Math.max(0, Math.min(255, v)) / 255);
+}
+function rng(s) { return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+
+// ---------------------------------------------------------------- WebGL
+const cv = document.getElementById("c");
+const gl = cv.getContext("webgl", { antialias: false });
+function shader(type, src) {
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, shader(gl.VERTEX_SHADER, "attribute vec2 a;void main(){gl_Position=vec4(a,0.,1.);}"));
+gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, document.getElementById("fs").textContent));
+gl.linkProgram(prog); gl.useProgram(prog);
+gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+const aLoc = gl.getAttribLocation(prog, "a"); gl.enableVertexAttribArray(aLoc); gl.vertexAttribPointer(aLoc, 2, gl.FLOAT, false, 0, 0);
+const U = n => gl.getUniformLocation(prog, n);
+function makeTex(unit, filter) {
+  const t = gl.createTexture(); gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+const dataTex = makeTex(0, gl.NEAREST), inkTex = makeTex(1, gl.LINEAR), shadowTex = makeTex(2, gl.LINEAR);
+gl.uniform1i(U("uData"), 0); gl.uniform1i(U("uInk"), 1); gl.uniform1i(U("uShadow"), 2);
+
+// ---------------------------------------------------------------- Landschaft (Horizont) + Wanderer als Schattenfigur
+// Bodenlinie in Anteilen der Hoehe (Canvas-y nach unten): sanfte Huegel, dieselbe Funktion fuer Tusche und Figur
+const groundY = (xn, h) => h * (0.76 + 0.022 * Math.sin(xn * 3.1 + seed % 7) + 0.012 * Math.sin(xn * 7.7 + 1.3));
+function paintLandscape(x, w, h, cell, R) {
+  // ferne Berge: sehr blasse, weiche Tuscheflaechen
+  for (let k = 0; k < 3; k++) {
+    const base = h * (0.60 + 0.05 * k), amp = h * (0.06 - 0.015 * k), ph = R() * 6;
+    x.beginPath(); x.moveTo(0, h);
+    for (let i = 0; i <= 60; i++) {
+      const xn = i / 60;
+      x.lineTo(xn * w, base - amp * (0.6 + 0.4 * Math.sin(xn * (2 + k) + ph)) * (0.7 + 0.3 * Math.sin(xn * 11 + ph * 2)));
+    }
+    x.lineTo(w, h); x.closePath();
+    const g = x.createLinearGradient(0, base - amp, 0, h);
+    g.addColorStop(0, `rgba(40,36,32,${0.10 + 0.04 * k})`); g.addColorStop(1, "rgba(40,36,32,0)");
+    x.fillStyle = g; x.fill();
+  }
+  // Weg: trockener Pinselstrich entlang der Bodenlinie, darunter verwaschene Tusche
+  for (let b = 0; b < 5; b++) {
+    x.strokeStyle = `rgba(26,22,20,${0.12 + 0.10 * R()})`; x.lineWidth = cell * (0.015 + 0.02 * R());
+    x.beginPath();
+    for (let i = 0; i <= 120; i++) {
+      const xn = i / 120, y = groundY(xn, h) + (b - 2) * cell * 0.012 + (R() - 0.5) * cell * 0.006;
+      if (R() < 0.03) { x.stroke(); x.beginPath(); x.moveTo(xn * w, y); } else x.lineTo(xn * w, y);
+    }
+    x.stroke();
+  }
+  const g2 = x.createLinearGradient(0, h * 0.74, 0, h);
+  g2.addColorStop(0, "rgba(38,34,30,0.16)"); g2.addColorStop(1, "rgba(38,34,30,0.05)");
+  x.fillStyle = g2; x.beginPath(); x.moveTo(0, h);
+  for (let i = 0; i <= 60; i++) x.lineTo(i / 60 * w, groundY(i / 60, h) + cell * 0.02);
+  x.lineTo(w, h); x.closePath(); x.fill();
+  // ein paar Graeser am Wegrand
+  for (let i = 0; i < 26; i++) {
+    const xn = R(), gx = xn * w, gy = groundY(xn, h);
+    for (let j = 0; j < 4; j++) {
+      x.strokeStyle = `rgba(30,26,22,${0.18 + 0.2 * R()})`; x.lineWidth = 1 + cell * 0.006;
+      x.beginPath(); x.moveTo(gx, gy); x.quadraticCurveTo(gx + (R() - 0.5) * cell * 0.1, gy - cell * 0.08, gx + (R() - 0.5) * cell * 0.18, gy - cell * (0.08 + 0.1 * R())); x.stroke();
+    }
+  }
+}
+
+const shadowCv = document.createElement("canvas"), shadowCx = shadowCv.getContext("2d");
+const figCv = document.createElement("canvas"), figCx = figCv.getContext("2d");
+function drawWanderer(t) {
+  const sc = 3, w = Math.ceil(cv.width / sc), h = Math.ceil(cv.height / sc);   // niedrige Aufloesung, spaeter weich
+  if (shadowCv.width !== w || shadowCv.height !== h) { shadowCv.width = figCv.width = w; shadowCv.height = figCv.height = h; }
+  figCx.clearRect(0, 0, w, h);
+  if (motif === "wanderer" && paint) {
+    const H = cell / sc * 1.45;                                      // Figurhoehe
+    const speed = w * 0.0105;                                        // ~ 95 s fuer eine Durchquerung
+    const span = w + 2 * H, dist = t * speed + span * 0.42;         // Start schon unterwegs
+    const X = (dist % span) - H;                                      // endlos: am Ende beginnt er von vorn
+    const ph = dist / (H * 0.62) * Math.PI;                           // Schrittphase passt zur Strecke
+    const Y = groundY(Math.min(1, Math.max(0, X / w)), h);
+    const fade = Math.min(1, Math.max(0, Math.min((X + H) / (H * 2.5), (w + H - X) / (H * 2.5))));
+    const c = figCx;
+    c.save(); c.translate(X, Y); c.globalAlpha = fade;
+    c.fillStyle = c.strokeStyle = "#000"; c.lineCap = "round"; c.lineJoin = "round";
+    const bob = -Math.abs(Math.cos(ph)) * H * 0.018;
+    const hipY = -H * 0.47 + bob, thigh = H * 0.24, shin = H * 0.25;
+    for (let k = 0; k < 2; k++) {                                   // Beine: Oberschenkel schwingt, Knie beugt beim Nachziehen
+      const sw = Math.sin(ph + k * Math.PI), a = 0.38 * sw;
+      const bend = 0.55 * Math.max(0, -Math.cos(ph + k * Math.PI));
+      const kx = Math.sin(a) * thigh, ky = hipY + Math.cos(a) * thigh;
+      const fx = kx + Math.sin(a - bend) * shin, fy = ky + Math.cos(a - bend) * shin;
+      c.lineWidth = H * 0.055;
+      c.beginPath(); c.moveTo(0, hipY); c.lineTo(kx, ky); c.lineTo(fx, Math.min(fy, 0)); c.stroke();
+      c.beginPath(); c.ellipse(fx + H * 0.025, Math.min(fy, 0), H * 0.035, H * 0.014, 0, 0, 7); c.fill();   // Sandale
+    }
+    // Gewand (leicht nach vorn geneigt), Buendel auf dem Ruecken
+    c.beginPath();
+    c.moveTo(-H * 0.075, -H * 0.80 + bob); c.lineTo(H * 0.085, -H * 0.80 + bob);
+    c.lineTo(H * 0.15 + Math.sin(ph) * H * 0.02, -H * 0.36 + bob); c.lineTo(-H * 0.14 - Math.sin(ph) * H * 0.02, -H * 0.38 + bob);
+    c.closePath(); c.fill();
+    c.beginPath(); c.ellipse(-H * 0.11, -H * 0.70 + bob, H * 0.065, H * 0.085, -0.3, 0, 7); c.fill();
+    // Kopf + Kasa (Strohhut)
+    c.beginPath(); c.arc(H * 0.012, -H * 0.86 + bob, H * 0.048, 0, 7); c.fill();
+    c.beginPath(); c.moveTo(-H * 0.19, -H * 0.875 + bob); c.lineTo(H * 0.02, -H * 0.99 + bob); c.lineTo(H * 0.21, -H * 0.875 + bob);
+    c.quadraticCurveTo(H * 0.01, -H * 0.85 + bob, -H * 0.19, -H * 0.875 + bob); c.fill();
+    // Arme: vorderer Arm fuehrt den Stab, hinterer schwingt leise
+    const armA = 0.35 * Math.sin(ph), sh = { x: H * 0.03, y: -H * 0.76 + bob };
+    const hand = { x: sh.x + Math.sin(0.5 + armA) * H * 0.2, y: sh.y + Math.cos(0.5 + armA) * H * 0.2 };
+    c.lineWidth = H * 0.045;
+    c.beginPath(); c.moveTo(sh.x, sh.y); c.lineTo(hand.x, hand.y); c.stroke();
+    c.beginPath(); c.moveTo(sh.x - H * 0.02, sh.y); c.lineTo(sh.x - H * 0.02 - Math.sin(armA) * H * 0.16, sh.y + H * 0.17); c.stroke();
+    c.lineWidth = H * 0.022;                                         // Wanderstab
+    c.beginPath(); c.moveTo(hand.x - H * 0.03, hand.y - H * 0.28); c.lineTo(hand.x + H * 0.07, 0); c.stroke();
+    c.restore();
+  }
+  // weich: Schatten auf Papier ist nie scharf
+  shadowCx.clearRect(0, 0, w, h);
+  shadowCx.filter = "blur(" + Math.max(1, cell / sc * 0.02).toFixed(1) + "px)";
+  shadowCx.drawImage(figCv, 0, 0);
+  shadowCx.filter = "none";
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, shadowTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, shadowCv);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+}
+
+// ---------------------------------------------------------------- Sumi-e-Malerei (prozedural, pro Start anders; ?seed=… fixiert)
+function paintInk(w, h, cell) {
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  const out = c.getContext("2d"), R = rng(seed);
+  const layer = document.createElement("canvas"); layer.width = w; layer.height = h;
+  const x = layer.getContext("2d");                          // alles hierhin, danach einmal weich uebertragen
+  x.clearRect(0, 0, w, h);
+  if (motif === "wanderer") { paintLandscape(x, w, h, cell, R); }
+  else {
+  // weiche Tuscheflaechen (verwaschene Blaetter im Hintergrund)
+  for (let i = 0; i < 5; i++) {
+    const cx = w * (0.1 + 0.8 * R()), cy = h * (0.15 + 0.7 * R()), r = cell * (0.8 + 1.6 * R());
+    const g = x.createRadialGradient(cx, cy, 0, cx, cy, r);
+    g.addColorStop(0, "rgba(38,34,30,0.22)"); g.addColorStop(1, "rgba(38,34,30,0)");
+    x.fillStyle = g; x.beginPath(); x.ellipse(cx, cy, r * 1.4, r * 0.8, R() * 3, 0, 7); x.fill();
+  }
+  // Ast: gekruemmter, sich verjuengender Tuschestrich, mit Seitenzweigen
+  const tips = [];
+  function branch(x0, y0, ang, len, width, depth) {
+    let px = x0, py = y0, a = ang;
+    const steps = 40, pts = [];
+    for (let s = 0; s <= steps; s++) {                       // Pfad mit leichten Knicken
+      pts.push([px, py, width * Math.pow(1 - s / steps, 0.8) * (0.8 + 0.4 * R())]);
+      a += (R() - 0.5) * 0.22 + (R() < 0.06 ? (R() - 0.5) * 0.8 : 0);
+      px += Math.cos(a) * len / steps; py += Math.sin(a) * len / steps;
+    }
+    x.save();
+    for (let bristle = 0; bristle < 7; bristle++) {           // Borsten: versetzte duenne Striche = trockener Pinsel
+      const off = (bristle / 6 - 0.5), alpha = 0.18 + 0.22 * R();
+      x.strokeStyle = `rgba(26,22,20,${alpha})`; x.lineCap = "round";
+      for (let i = 1; i < pts.length; i++) {
+        if (R() < 0.06) continue;                            // Luecken (Pinsel setzt aus)
+        const [ax, ay, aw] = pts[i - 1], [bx, by, bw] = pts[i];
+        const nx = -(by - ay), ny = bx - ax, nl = Math.hypot(nx, ny) || 1;
+        x.lineWidth = Math.max(0.6, aw * 0.28);
+        x.beginPath(); x.moveTo(ax + nx / nl * off * aw, ay + ny / nl * off * aw);
+        x.lineTo(bx + nx / nl * off * bw, by + ny / nl * off * bw); x.stroke();
+      }
+    }
+    x.restore();
+    for (let i = 8; i < pts.length - 4; i++)                 // Seitenzweige
+      if (depth > 0 && R() < 0.07) branch(pts[i][0], pts[i][1], a + (R() < 0.5 ? -1 : 1) * (0.5 + 0.6 * R()), len * 0.4, pts[i][2] * 0.6, depth - 1);
+    tips.push([pts[pts.length - 1][0], pts[pts.length - 1][1]]);
+  }
+  const fromLeftAst = R() < 0.5, fromLeft = fromLeftAst;
+  branch(fromLeft ? -cell * 0.3 : w + cell * 0.3, h * (0.35 + 0.4 * R()), fromLeft ? -0.25 : Math.PI + 0.25, w * 0.62, cell * 0.10, 2);
+  // Ahornblaetter: rot-orange, halbtransparent, in Buescheln an den Zweigenden
+  function maple(cx, cy, s, rot, col) {
+    x.save(); x.translate(cx, cy); x.rotate(rot); x.beginPath();
+    for (let k = 0; k < 5; k++) {
+      const a0 = -Math.PI / 2 + (k - 2) * 0.62, a1 = a0 + 0.31;
+      const L = s * (k === 2 ? 1 : k === 1 || k === 3 ? 0.9 : 0.6);
+      x.lineTo(Math.cos(a0) * L, Math.sin(a0) * L); x.lineTo(Math.cos(a1) * s * 0.35, Math.sin(a1) * s * 0.35);
+    }
+    x.lineTo(0, s * 0.25); x.closePath();
+    x.fillStyle = col; x.fill(); x.restore();
+  }
+  for (const [tx, ty] of tips) {
+    const n = 4 + Math.floor(R() * 7);
+    for (let i = 0; i < n; i++) {
+      const hue = R() < 0.7 ? `rgba(${200 + 40 * R() | 0},${60 + 50 * R() | 0},${35 + 20 * R() | 0},${0.30 + 0.25 * R()})`
+                            : `rgba(120,70,40,${0.25 + 0.2 * R()})`;
+      maple(tx + (R() - 0.5) * cell * 1.2, ty + (R() - 0.5) * cell * 1.0, cell * (0.12 + 0.12 * R()), R() * 6.3, hue);
+    }
+  }
+  }
+  const fromLeft = motif === "wanderer" ? false : fromLeftAst;
+  // Signatur-Stempel (kleines rotes Siegel) unten in einer Ecke
+  x.fillStyle = "rgba(170,40,30,0.55)";
+  const sx = fromLeft ? w - cell * 0.9 : cell * 0.6, sy = h - cell * 1.1;
+  x.fillRect(sx, sy, cell * 0.18, cell * 0.24);
+  // Tusche verlaeuft leicht ins Papier: Ebene einmal weich uebertragen + scharf darueber (Kern bleibt lesbar)
+  out.filter = "blur(" + Math.max(1, cell * 0.012).toFixed(1) + "px)"; out.drawImage(layer, 0, 0);
+  out.filter = "none"; out.globalAlpha = 0.55; out.drawImage(layer, 0, 0); out.globalAlpha = 1;
+  // Tusche -> Absorption: rgb = durchgelassene Farbe, a = Deckkraft
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, inkTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+}
+
+let COLS, cell, bright, kelv, energy, pix, started = false;
+function layout() {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  cv.width = Math.round(innerWidth * dpr); cv.height = Math.round(innerHeight * dpr);
+  gl.viewport(0, 0, cv.width, cv.height);
+  const minMargin = Math.round(cv.height * 0.03);                 // Lackrahmen
+  cell = Math.floor((cv.height - 2 * minMargin) / ROWS);
+  COLS = Math.max(1, Math.floor((cv.width - 2 * minMargin) / cell));
+  const ox = Math.round((cv.width - COLS * cell) / 2), oy = Math.round((cv.height - ROWS * cell) / 2);
+  gl.uniform2f(U("uGrid"), COLS, ROWS); gl.uniform2f(U("uRes"), cv.width, cv.height);
+  gl.uniform1f(U("uCell"), cell); gl.uniform2f(U("uOrigin"), ox, oy);
+  const n = COLS * ROWS;
+  bright = new Float32Array(n); kelv = new Float32Array(n).fill(2300); energy = new Float32Array(n); pix = new Uint8Array(n * 4);
+  started = false;
+  paintInk(cv.width, cv.height, cell);
+}
+
+// ---------------------------------------------------------------- Audio (ueber Sekunden gemittelt)
+let analyser, fbin, bands = new Float32Array(NB), level = 0;
+const start = document.getElementById("start"), hud = document.getElementById("hud");
+async function startAudio() {
+  if (demo) { start.hidden = true; return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    const ac = new (window.AudioContext || window.webkitAudioContext)(); await ac.resume();
+    analyser = ac.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.6;
+    ac.createMediaStreamSource(stream).connect(analyser);
+    fbin = new Uint8Array(analyser.frequencyBinCount); start.hidden = true;
+  } catch (e) {
+    start.textContent = "Kein Mikrofon (" + e.name + ") – Demo läuft. Taste D wechselt.";
+    demo = true; setTimeout(() => (start.hidden = true), 3000);
+  }
+}
+start.addEventListener("click", startAudio);
+startAudio();
+const edges = []; for (let i = 0; i <= NB; i++) edges.push(40 * Math.pow(12000 / 40, i / NB));
+let gPeak = 0.1; const floor = new Float32Array(NB).fill(0.02);
+function readAudio(t) {
+  const raw = new Float32Array(NB);
+  if (demo || !analyser) {
+    for (let i = 0; i < NB; i++) raw[i] = 0.35 + 0.3 * Math.sin(t * 0.4 - i * 0.5) + 0.15 * Math.sin(t * 1.1 + i);
+  } else {
+    analyser.getByteFrequencyData(fbin);
+    const hz = analyser.context.sampleRate / analyser.fftSize;
+    for (let i = 0; i < NB; i++) {
+      const a = Math.max(1, Math.floor(edges[i] / hz)), b = Math.max(a + 1, Math.floor(edges[i + 1] / hz));
+      let s = 0; for (let k = a; k < b; k++) s += fbin[k]; raw[i] = s / (b - a) / 255;
+    }
+  }
+  let mx = 0;
+  for (let i = 0; i < NB; i++) {
+    floor[i] += (raw[i] - floor[i]) * (raw[i] < floor[i] ? 0.2 : 0.0015);
+    raw[i] = Math.max(0, raw[i] - floor[i] * 1.2); mx = Math.max(mx, raw[i]);
+  }
+  gPeak = Math.max(mx, gPeak * 0.998, 0.04);
+  let sum = 0;
+  for (let i = 0; i < NB; i++) {
+    const v = Math.min(1, Math.pow(raw[i] / gPeak, 1.3));
+    bands[i] += (v - bands[i]) * (v > bands[i] ? 0.04 : 0.015); sum += bands[i];
+  }
+  level += (sum / NB - level) * 0.01;
+}
+
+// ---------------------------------------------------------------- Feld je Kumiko-Feld (sanft) + zwei Lichtquellen
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+  const h = (a, b) => { const s = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return s - Math.floor(s); };
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  return (h(xi, yi) * (1 - u) + h(xi + 1, yi) * u) * (1 - v) + (h(xi, yi + 1) * (1 - u) + h(xi + 1, yi + 1) * u) * v;
+}
+let flow = 0;
+function update(t, dt) {
+  flow += dt * (0.03 + 0.05 * level);
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const i = r * COLS + c, b = bands[Math.min(NB - 1, Math.floor((c / COLS) * NB))];
+    let target, k;
+    if (mode === "glut") {
+      const below = r > 0 ? energy[i - COLS] : b * 1.2;
+      energy[i] += (below * 0.97 - energy[i]) * 0.025;
+      target = 0.25 + 0.75 * Math.min(1, energy[i]); k = 1800 + 1800 * Math.min(1, energy[i]);
+    } else {
+      const base = vnoise(c * 0.35 + flow, r * 0.45 - flow * 0.6) * 0.65 + vnoise(c * 0.9 - flow * 1.3, r * 0.9 + 3) * 0.35;
+      const sp = Math.min(1, Math.max(0, (base - 0.28) / 0.44)), shaped = sp * sp * (3 - 2 * sp);
+      target = 0.12 + 0.75 * Math.pow(shaped, 1.2) + (mode === "feld" ? 0.2 * b : 0.08 * b);
+      k = 2000 + 1500 * b + 500 * base;
+    }
+    target = Math.min(1, target); k = Math.max(K_MIN, Math.min(K_MAX, k));
+    if (!started) { bright[i] = target; kelv[i] = k; }
+    bright[i] += (target - bright[i]) * (target > bright[i] ? 0.03 : 0.018);
+    kelv[i] += (k - kelv[i]) * 0.01;
+    const [R, G, B] = kelvinRGB(kelv[i]), br = Math.sqrt(bright[i]);
+    pix[i * 4] = 255 * Math.sqrt(R) * br; pix[i * 4 + 1] = 255 * Math.sqrt(G) * br; pix[i * 4 + 2] = 255 * Math.sqrt(B) * br; pix[i * 4 + 3] = 255;
+  }
+  started = true;
+  // Lichtquellen (wie Gluehbirnen hinter dem Papier): wandern kaum, atmen mit der Lautstaerke
+  const W = cv.width, H = cv.height, s = 0.85 + 0.35 * level + (mode === "wellen" ? 0.12 * Math.sin(t * 0.6) : 0);
+  gl.uniform1f(U("uFlicker"), 1 + 0.025 * Math.sin(t * 2.3) * Math.sin(t * 0.71) + 0.012 * Math.sin(t * 7.9));
+  gl.uniform4f(U("uLamp0"), W * (0.46 + 0.05 * Math.sin(t * 0.05)), H * (0.50 + 0.04 * Math.cos(t * 0.04)), H * 0.48, 1.6 * s);
+  gl.uniform4f(U("uLamp1"), W * (0.60 + 0.06 * Math.sin(t * 0.037 + 2)), H * (0.44 + 0.05 * Math.sin(t * 0.03)), H * 0.26, 0.7 * s);
+}
+
+// ---------------------------------------------------------------- Schleife + Bedienung
+let last = performance.now(), T = 0, hudTimer;
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now; T += dt;
+  readAudio(T); update(T, dt); drawWanderer(T);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, dataTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, COLS, ROWS, 0, gl.RGBA, gl.UNSIGNED_BYTE, pix);
+  gl.uniform1f(U("uTime"), T); gl.uniform1f(U("uPaint"), paint);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  requestAnimationFrame(loop);
+}
+function showHud() {
+  hud.innerHTML = `<b>${{ feld: "Feld", glut: "Glut", wellen: "Atem" }[mode]}</b> · <kbd>1</kbd> Feld <kbd>2</kbd> Glut <kbd>3</kbd> Atem · <kbd>W</kbd> Motiv (${motif === "wanderer" ? "Wanderer" : "Ast"}) · <kbd>M</kbd> Malerei ${paint ? "aus" : "an"} · <kbd>N</kbd> neu · <kbd>D</kbd> ${demo ? "Mikrofon" : "Demo"}`;
+  document.body.classList.add("show-hud"); clearTimeout(hudTimer);
+  hudTimer = setTimeout(() => document.body.classList.remove("show-hud"), 2500);
+}
+addEventListener("keydown", e => {
+  const k = e.key.toLowerCase();
+  if (k === "1") mode = "feld"; else if (k === "2") mode = "glut"; else if (k === "3") mode = "wellen";
+  else if (k === "m") paint = paint ? 0 : 1;
+  else if (k === "n") { seed = Math.floor(Math.random() * 1e6); paintInk(cv.width, cv.height, cell); }
+  else if (k === "w") { motif = motif === "wanderer" ? "ast" : "wanderer"; paintInk(cv.width, cv.height, cell); }
+  else if (k === "d") { demo = !demo; if (!demo && !analyser) startAudio(); }
+  else return;
+  showHud();
+});
+addEventListener("mousemove", showHud);
+addEventListener("resize", layout);
+layout(); requestAnimationFrame(loop);
+</script>
+</body>
+</html>

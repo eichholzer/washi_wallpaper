@@ -3,473 +3,352 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Washi Wanderer</title>
+<title>Andon Wanderer</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #0e0806; overflow: hidden; cursor: none; }
+  html, body { margin: 0; height: 100%; background: #0d0907; overflow: hidden; cursor: none; }
   canvas { display: block; width: 100vw; height: 100vh; }
   #hud { position: fixed; left: 18px; bottom: 16px; font: 12px/1.6 -apple-system, "Helvetica Neue", sans-serif;
          color: #e8cfa8; text-shadow: 0 1px 3px #000; opacity: 0; transition: opacity .8s; pointer-events: none; }
   body.show-hud #hud { opacity: .9; }
   kbd { border: 1px solid rgba(232,207,168,.5); padding: 0 5px; border-radius: 3px; }
+  #word { position: fixed; right: 22px; bottom: 18px; font: italic 15px Georgia, serif; color: #f0d9b5;
+          text-shadow: 0 1px 4px #000; opacity: 0; transition: opacity .6s; pointer-events: none; }
+  #word.on { opacity: .8; }
   #start { position: fixed; inset: 0; display: grid; place-items: center; font: 15px -apple-system, sans-serif;
-           color: #f3e2c6; background: rgba(14,8,6,.35); cursor: pointer; text-shadow: 0 1px 4px #000; }
+           color: #f3e2c6; background: rgba(13,9,7,.35); cursor: pointer; text-shadow: 0 1px 4px #000; text-align: center; }
   #start[hidden] { display: none; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="start">Klicken, um das Mikrofon zu starten</div>
+<div id="start">Klicken, um Mikrofon und Spracherkennung zu starten</div>
 <div id="hud"></div>
-<script id="fs" type="x-shader/x-fragment">
-precision highp float;
-uniform sampler2D uData;      // je Feld: rgb = Lichtfarbe * Helligkeit (Ton, Muster)
-uniform sampler2D uInk;       // Tusche (Boden, Nebel): rgb = Tuschefarbe, a = Deckkraft
-uniform sampler2D uShadow;    // Schattenfigur hinter dem Papier (a = Dichte, schon weich)
-uniform vec2 uGrid, uRes, uOrigin;
-uniform float uCell, uTime, uPaint, uFlicker;
-uniform vec4 uLamp0, uLamp1;  // Lichtquellen hinter dem Papier: x, y (Pixel), Radius, Staerke
-
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float noise(vec2 p) {
-  vec2 i = floor(p), f = fract(p), u = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
-}
-float fbm(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { s += a * noise(p); p *= 2.03; a *= 0.5; } return s; }
-
-vec3 cellLight(vec2 id) {
-  vec2 uv = (clamp(id, vec2(0.0), uGrid - 1.0) + 0.5) / uGrid;
-  vec3 c = texture2D(uData, uv).rgb;
-  return c * c;
-}
-float lamp(vec4 l, vec2 p) { vec2 d = (p - l.xy) / l.z; return l.w * exp(-dot(d, d)); }
-
-void main() {
-  vec2 px = gl_FragCoord.xy;
-  vec2 p = (px - uOrigin) / uCell;
-  vec2 q = px / uCell;
-
-  // Rahmen: dunkler Lack mit weichem Glanz, feine Holzmaserung
-  if (p.x < 0.0 || p.y < 0.0 || p.x >= uGrid.x || p.y >= uGrid.y) {
-    float g = fbm(vec2(q.x * 0.5, q.y * 10.0));
-    float sheen = 0.5 + 0.5 * sin(px.y / uRes.y * 3.1416);
-    vec3 lac = vec3(0.070, 0.040, 0.030) * (0.8 + 0.35 * g) * (0.85 + 0.25 * sheen);
-    gl_FragColor = vec4(lac, 1.0);
-    return;
-  }
-  vec2 id = floor(p), f = fract(p);
-  // Holz ist nie exakt: Stablage schwankt minimal entlang der Laenge
-  vec2 fw = f + vec2(0.006 * (noise(vec2(q.y * 1.3, id.x * 3.1)) - 0.5), 0.006 * (noise(vec2(q.x * 1.3, id.y * 2.7)) - 0.5));
-  float ex = min(fw.x, 1.0 - fw.x), ey = min(fw.y, 1.0 - fw.y);
-
-  // Laternenlicht: grosses, warmes Leuchten aus der Mitte (Lichtquellen hinter dem Papier)
-  float glow = (lamp(uLamp0, px) + lamp(uLamp1, px) + 0.08) * uFlicker;
-  vec3 C = cellLight(id);                                  // Ton / Muster je Feld
-  float cb = dot(C, vec3(0.3, 0.55, 0.15));
-  vec3 ccol = cb > 0.0001 ? C / cb : vec3(1.0);
-  // Glutfarbe: Mitte goldpfirsich, zum Rand rosig/amber
-  vec2 cUV = px / uRes - 0.5;
-  vec3 warm = mix(vec3(1.0, 0.86, 0.62), vec3(0.95, 0.58, 0.46), smoothstep(0.05, 0.55, length(cUV)));   // Kern goldweiss, Rand rosig
-  vec3 light = warm * mix(vec3(1.0), ccol, 0.35) * glow * (0.18 + 1.25 * cb);   // Felder heben sich ab wie im Favorit
-
-  // Washi: Fasern, Wolken, Knitterfalten
-  float fib = fbm(vec2(q.x * 2.4, q.y * 24.0) + 3.1);
-  float fib2 = fbm(vec2(q.x * 26.0, q.y * 2.2) + 9.4);
-  float cloud = fbm(q * 1.2 + 7.3);
-  float cr = abs(noise(q * 0.9 + 2.0) - 0.5) + abs(noise(q * 1.7 + 8.0) - 0.5) * 0.6;
-  float crease = 1.0 - smoothstep(0.0, 0.045, cr);        // feine Knicklinien
-  float paper = 0.80 + 0.26 * cloud + 0.14 * (fib - 0.5) + 0.07 * (fib2 - 0.5) - 0.11 * crease
-              + 0.03 * (hash(floor(px)) - 0.5);
-  vec3 col = light * vec3(1.0, 0.93, 0.83) * paper;
-
-  // Sumi-e: Tusche absorbiert Licht (dunkle Aeste, rote Ahornblaetter, Tuscheflaechen)
-  vec4 ink = texture2D(uInk, px / uRes);
-  col *= mix(vec3(1.0), ink.rgb, ink.a * uPaint);
-
-  // Schatten des Wanderers auf dem Papier (weich, warmbraun statt schwarz)
-  float shd = texture2D(uShadow, px / uRes).a;
-  col *= mix(vec3(1.0), vec3(0.20, 0.13, 0.09), shd * 0.85);
-
-  // Kumiko-Stab: weicher Schatten auf dem Papier (Tiefe), dann dunkler Lackstab
-  float sh = exp(-ex / 0.07) * 0.22 + exp(-ey / 0.07) * 0.22;
-  col *= 1.0 - min(0.4, sh);
-  col += vec3(0.010, 0.005, 0.003) * paper;                // Restglimmen
-  col = 1.0 - exp(-col * 1.8);
-  col = sqrt(max(col, 0.0));
-
-  float wx = 0.019 + 0.004 * (noise(vec2(id.x * 5.3, q.y * 0.6)) - 0.5);
-  float wy = 0.019 + 0.004 * (noise(vec2(q.x * 0.6, id.y * 4.9)) - 0.5);
-  float bar = max(1.0 - smoothstep(wx - 0.009, wx + 0.004, ex), 1.0 - smoothstep(wy - 0.009, wy + 0.004, ey));
-  bar *= 1.0 - 0.35 * smoothstep(0.6, 1.6, glow);         // helles Licht ueberstrahlt die Staebe (wie Auge/Kamera)
-  float bg = fbm(ex < ey ? vec2(q.x * 40.0, q.y * 1.5) : vec2(q.x * 1.5, q.y * 40.0));
-  vec3 lacquer = vec3(0.13, 0.075, 0.050) * (0.7 + 0.5 * bg);     // brauner Lack wie im Favorit
-  lacquer += vec3(0.20, 0.10, 0.06) * glow * 0.12;                // Streiflicht an der Kante
-  col = mix(col, lacquer, bar);
-  // Filmkorn (bewegt) + leichte Vignette: nimmt die digitale Glaette
-  float grain = hash(px * 0.73 + fract(uTime * 7.3) * 91.0) - 0.5;
-  col += grain * 0.028;
-  vec2 v = px / uRes - 0.5;
-  col *= 1.0 - 0.28 * dot(v, v);
-  gl_FragColor = vec4(col, 1.0);
-}
-</script>
+<div id="word"></div>
 <script>
 "use strict";
-// ---------------------------------------------------------------- Einstellungen (?modus=feld|glut|wellen &reihen=6 &malerei=0 &demo=1 &seed=3)
 const q = new URLSearchParams(location.search);
-let mode = q.get("modus") || "feld";
-const ROWS = +(q.get("reihen") || 6);
 let demo = q.get("demo") === "1";
-let paint = q.get("malerei") === "0" ? 0 : 1;
-let motif = q.get("motiv") || "wanderer";       // wanderer | ast
-let seed = +(q.get("seed") || Math.floor(Math.random() * 1e6));
-const NB = 10, K_MIN = 1800, K_MAX = 4500;     // Laternenlicht: Amber bis warmes Weiss
+const cv = document.getElementById("c"), ctx = cv.getContext("2d");
+const hud = document.getElementById("hud"), wordEl = document.getElementById("word"), start = document.getElementById("start");
 
-function kelvinRGB(k) {
-  const t = k / 100; let r, g, b;
-  r = t <= 66 ? 255 : 329.698727446 * Math.pow(t - 60, -0.1332047592);
-  g = t <= 66 ? 99.4708025861 * Math.log(t) - 161.1195681661 : 288.1221695283 * Math.pow(t - 60, -0.0755148492);
-  b = t >= 66 ? 255 : t <= 19 ? 0 : 138.5177312231 * Math.log(t - 10) - 305.0447927307;
-  return [r, g, b].map(v => Math.max(0, Math.min(255, v)) / 255);
-}
-function rng(s) { return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+// ---------------------------------------------------------------- Bilder + Geometrie (aus dem Foto der Laterne)
+const img = new Image(), maskImg = new Image();
+let G = null, ready = false;
+Promise.all([
+  fetch("assets/geometry.json").then(r => r.json()).then(j => (G = j)),
+  new Promise(res => { img.onload = res; img.src = "assets/lantern.jpg"; }),
+  new Promise(res => { maskImg.onload = res; maskImg.src = "assets/mask.png"; }),
+]).then(() => { ready = true; layout(); });
 
-// ---------------------------------------------------------------- WebGL
-const cv = document.getElementById("c");
-const gl = cv.getContext("webgl", { antialias: false });
-function shader(type, src) {
-  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
-  return s;
-}
-const prog = gl.createProgram();
-gl.attachShader(prog, shader(gl.VERTEX_SHADER, "attribute vec2 a;void main(){gl_Position=vec4(a,0.,1.);}"));
-gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, document.getElementById("fs").textContent));
-gl.linkProgram(prog); gl.useProgram(prog);
-gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
-gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-const aLoc = gl.getAttribLocation(prog, "a"); gl.enableVertexAttribArray(aLoc); gl.vertexAttribPointer(aLoc, 2, gl.FLOAT, false, 0, 0);
-const U = n => gl.getUniformLocation(prog, n);
-function makeTex(unit, filter) {
-  const t = gl.createTexture(); gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  return t;
-}
-const dataTex = makeTex(0, gl.NEAREST), inkTex = makeTex(1, gl.LINEAR), shadowTex = makeTex(2, gl.LINEAR);
-gl.uniform1i(U("uData"), 0); gl.uniform1i(U("uInk"), 1); gl.uniform1i(U("uShadow"), 2);
-
-// ---------------------------------------------------------------- Landschaft (Horizont) + Wanderer als Schattenfigur
-// Bodenlinie in Anteilen der Hoehe (Canvas-y nach unten): sanfte Huegel, dieselbe Funktion fuer Tusche und Figur
-const groundY = (xn, h) => h * (0.76 + 0.022 * Math.sin(xn * 3.1 + seed % 7) + 0.012 * Math.sin(xn * 7.7 + 1.3));
-function paintLandscape(x, w, h, cell, R) {
-  // ferne Berge: sehr blasse, weiche Tuscheflaechen
-  for (let k = 0; k < 3; k++) {
-    const base = h * (0.60 + 0.05 * k), amp = h * (0.06 - 0.015 * k), ph = R() * 6;
-    x.beginPath(); x.moveTo(0, h);
-    for (let i = 0; i <= 60; i++) {
-      const xn = i / 60;
-      x.lineTo(xn * w, base - amp * (0.6 + 0.4 * Math.sin(xn * (2 + k) + ph)) * (0.7 + 0.3 * Math.sin(xn * 11 + ph * 2)));
-    }
-    x.lineTo(w, h); x.closePath();
-    const g = x.createLinearGradient(0, base - amp, 0, h);
-    g.addColorStop(0, `rgba(40,36,32,${0.10 + 0.04 * k})`); g.addColorStop(1, "rgba(40,36,32,0)");
-    x.fillStyle = g; x.fill();
-  }
-  // Weg: trockener Pinselstrich entlang der Bodenlinie, darunter verwaschene Tusche
-  for (let b = 0; b < 5; b++) {
-    x.strokeStyle = `rgba(26,22,20,${0.12 + 0.10 * R()})`; x.lineWidth = cell * (0.015 + 0.02 * R());
-    x.beginPath();
-    for (let i = 0; i <= 120; i++) {
-      const xn = i / 120, y = groundY(xn, h) + (b - 2) * cell * 0.012 + (R() - 0.5) * cell * 0.006;
-      if (R() < 0.03) { x.stroke(); x.beginPath(); x.moveTo(xn * w, y); } else x.lineTo(xn * w, y);
-    }
-    x.stroke();
-  }
-  const g2 = x.createLinearGradient(0, h * 0.74, 0, h);
-  g2.addColorStop(0, "rgba(38,34,30,0.16)"); g2.addColorStop(1, "rgba(38,34,30,0.05)");
-  x.fillStyle = g2; x.beginPath(); x.moveTo(0, h);
-  for (let i = 0; i <= 60; i++) x.lineTo(i / 60 * w, groundY(i / 60, h) + cell * 0.02);
-  x.lineTo(w, h); x.closePath(); x.fill();
-  // ein paar Graeser am Wegrand
-  for (let i = 0; i < 26; i++) {
-    const xn = R(), gx = xn * w, gy = groundY(xn, h);
-    for (let j = 0; j < 4; j++) {
-      x.strokeStyle = `rgba(30,26,22,${0.18 + 0.2 * R()})`; x.lineWidth = 1 + cell * 0.006;
-      x.beginPath(); x.moveTo(gx, gy); x.quadraticCurveTo(gx + (R() - 0.5) * cell * 0.1, gy - cell * 0.08, gx + (R() - 0.5) * cell * 0.18, gy - cell * (0.08 + 0.1 * R())); x.stroke();
-    }
-  }
-}
-
-const shadowCv = document.createElement("canvas"), shadowCx = shadowCv.getContext("2d");
-const figCv = document.createElement("canvas"), figCx = figCv.getContext("2d");
-function drawWanderer(t) {
-  const sc = 3, w = Math.ceil(cv.width / sc), h = Math.ceil(cv.height / sc);   // niedrige Aufloesung, spaeter weich
-  if (shadowCv.width !== w || shadowCv.height !== h) { shadowCv.width = figCv.width = w; shadowCv.height = figCv.height = h; }
-  figCx.clearRect(0, 0, w, h);
-  if (motif === "wanderer" && paint) {
-    const H = cell / sc * 1.45;                                      // Figurhoehe
-    const speed = w * 0.0105;                                        // ~ 95 s fuer eine Durchquerung
-    const span = w + 2 * H, dist = t * speed + span * 0.42;         // Start schon unterwegs
-    const X = (dist % span) - H;                                      // endlos: am Ende beginnt er von vorn
-    const ph = dist / (H * 0.62) * Math.PI;                           // Schrittphase passt zur Strecke
-    const Y = groundY(Math.min(1, Math.max(0, X / w)), h);
-    const fade = Math.min(1, Math.max(0, Math.min((X + H) / (H * 2.5), (w + H - X) / (H * 2.5))));
-    const c = figCx;
-    c.save(); c.translate(X, Y); c.globalAlpha = fade;
-    c.fillStyle = c.strokeStyle = "#000"; c.lineCap = "round"; c.lineJoin = "round";
-    const bob = -Math.abs(Math.cos(ph)) * H * 0.018;
-    const hipY = -H * 0.47 + bob, thigh = H * 0.24, shin = H * 0.25;
-    for (let k = 0; k < 2; k++) {                                   // Beine: Oberschenkel schwingt, Knie beugt beim Nachziehen
-      const sw = Math.sin(ph + k * Math.PI), a = 0.38 * sw;
-      const bend = 0.55 * Math.max(0, -Math.cos(ph + k * Math.PI));
-      const kx = Math.sin(a) * thigh, ky = hipY + Math.cos(a) * thigh;
-      const fx = kx + Math.sin(a - bend) * shin, fy = ky + Math.cos(a - bend) * shin;
-      c.lineWidth = H * 0.055;
-      c.beginPath(); c.moveTo(0, hipY); c.lineTo(kx, ky); c.lineTo(fx, Math.min(fy, 0)); c.stroke();
-      c.beginPath(); c.ellipse(fx + H * 0.025, Math.min(fy, 0), H * 0.035, H * 0.014, 0, 0, 7); c.fill();   // Sandale
-    }
-    // Gewand (leicht nach vorn geneigt), Buendel auf dem Ruecken
-    c.beginPath();
-    c.moveTo(-H * 0.075, -H * 0.80 + bob); c.lineTo(H * 0.085, -H * 0.80 + bob);
-    c.lineTo(H * 0.15 + Math.sin(ph) * H * 0.02, -H * 0.36 + bob); c.lineTo(-H * 0.14 - Math.sin(ph) * H * 0.02, -H * 0.38 + bob);
-    c.closePath(); c.fill();
-    c.beginPath(); c.ellipse(-H * 0.11, -H * 0.70 + bob, H * 0.065, H * 0.085, -0.3, 0, 7); c.fill();
-    // Kopf + Kasa (Strohhut)
-    c.beginPath(); c.arc(H * 0.012, -H * 0.86 + bob, H * 0.048, 0, 7); c.fill();
-    c.beginPath(); c.moveTo(-H * 0.19, -H * 0.875 + bob); c.lineTo(H * 0.02, -H * 0.99 + bob); c.lineTo(H * 0.21, -H * 0.875 + bob);
-    c.quadraticCurveTo(H * 0.01, -H * 0.85 + bob, -H * 0.19, -H * 0.875 + bob); c.fill();
-    // Arme: vorderer Arm fuehrt den Stab, hinterer schwingt leise
-    const armA = 0.35 * Math.sin(ph), sh = { x: H * 0.03, y: -H * 0.76 + bob };
-    const hand = { x: sh.x + Math.sin(0.5 + armA) * H * 0.2, y: sh.y + Math.cos(0.5 + armA) * H * 0.2 };
-    c.lineWidth = H * 0.045;
-    c.beginPath(); c.moveTo(sh.x, sh.y); c.lineTo(hand.x, hand.y); c.stroke();
-    c.beginPath(); c.moveTo(sh.x - H * 0.02, sh.y); c.lineTo(sh.x - H * 0.02 - Math.sin(armA) * H * 0.16, sh.y + H * 0.17); c.stroke();
-    c.lineWidth = H * 0.022;                                         // Wanderstab
-    c.beginPath(); c.moveTo(hand.x - H * 0.03, hand.y - H * 0.28); c.lineTo(hand.x + H * 0.07, 0); c.stroke();
-    c.restore();
-  }
-  // weich: Schatten auf Papier ist nie scharf
-  shadowCx.clearRect(0, 0, w, h);
-  shadowCx.filter = "blur(" + Math.max(1, cell / sc * 0.02).toFixed(1) + "px)";
-  shadowCx.drawImage(figCv, 0, 0);
-  shadowCx.filter = "none";
-  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, shadowTex);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, shadowCv);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-}
-
-// ---------------------------------------------------------------- Sumi-e-Malerei (prozedural, pro Start anders; ?seed=… fixiert)
-function paintInk(w, h, cell) {
-  const c = document.createElement("canvas"); c.width = w; c.height = h;
-  const out = c.getContext("2d"), R = rng(seed);
-  const layer = document.createElement("canvas"); layer.width = w; layer.height = h;
-  const x = layer.getContext("2d");                          // alles hierhin, danach einmal weich uebertragen
-  x.clearRect(0, 0, w, h);
-  if (motif === "wanderer") { paintLandscape(x, w, h, cell, R); }
-  else {
-  // weiche Tuscheflaechen (verwaschene Blaetter im Hintergrund)
-  for (let i = 0; i < 5; i++) {
-    const cx = w * (0.1 + 0.8 * R()), cy = h * (0.15 + 0.7 * R()), r = cell * (0.8 + 1.6 * R());
-    const g = x.createRadialGradient(cx, cy, 0, cx, cy, r);
-    g.addColorStop(0, "rgba(38,34,30,0.22)"); g.addColorStop(1, "rgba(38,34,30,0)");
-    x.fillStyle = g; x.beginPath(); x.ellipse(cx, cy, r * 1.4, r * 0.8, R() * 3, 0, 7); x.fill();
-  }
-  // Ast: gekruemmter, sich verjuengender Tuschestrich, mit Seitenzweigen
-  const tips = [];
-  function branch(x0, y0, ang, len, width, depth) {
-    let px = x0, py = y0, a = ang;
-    const steps = 40, pts = [];
-    for (let s = 0; s <= steps; s++) {                       // Pfad mit leichten Knicken
-      pts.push([px, py, width * Math.pow(1 - s / steps, 0.8) * (0.8 + 0.4 * R())]);
-      a += (R() - 0.5) * 0.22 + (R() < 0.06 ? (R() - 0.5) * 0.8 : 0);
-      px += Math.cos(a) * len / steps; py += Math.sin(a) * len / steps;
-    }
-    x.save();
-    for (let bristle = 0; bristle < 7; bristle++) {           // Borsten: versetzte duenne Striche = trockener Pinsel
-      const off = (bristle / 6 - 0.5), alpha = 0.18 + 0.22 * R();
-      x.strokeStyle = `rgba(26,22,20,${alpha})`; x.lineCap = "round";
-      for (let i = 1; i < pts.length; i++) {
-        if (R() < 0.06) continue;                            // Luecken (Pinsel setzt aus)
-        const [ax, ay, aw] = pts[i - 1], [bx, by, bw] = pts[i];
-        const nx = -(by - ay), ny = bx - ax, nl = Math.hypot(nx, ny) || 1;
-        x.lineWidth = Math.max(0.6, aw * 0.28);
-        x.beginPath(); x.moveTo(ax + nx / nl * off * aw, ay + ny / nl * off * aw);
-        x.lineTo(bx + nx / nl * off * bw, by + ny / nl * off * bw); x.stroke();
-      }
-    }
-    x.restore();
-    for (let i = 8; i < pts.length - 4; i++)                 // Seitenzweige
-      if (depth > 0 && R() < 0.07) branch(pts[i][0], pts[i][1], a + (R() < 0.5 ? -1 : 1) * (0.5 + 0.6 * R()), len * 0.4, pts[i][2] * 0.6, depth - 1);
-    tips.push([pts[pts.length - 1][0], pts[pts.length - 1][1]]);
-  }
-  const fromLeftAst = R() < 0.5, fromLeft = fromLeftAst;
-  branch(fromLeft ? -cell * 0.3 : w + cell * 0.3, h * (0.35 + 0.4 * R()), fromLeft ? -0.25 : Math.PI + 0.25, w * 0.62, cell * 0.10, 2);
-  // Ahornblaetter: rot-orange, halbtransparent, in Buescheln an den Zweigenden
-  function maple(cx, cy, s, rot, col) {
-    x.save(); x.translate(cx, cy); x.rotate(rot); x.beginPath();
-    for (let k = 0; k < 5; k++) {
-      const a0 = -Math.PI / 2 + (k - 2) * 0.62, a1 = a0 + 0.31;
-      const L = s * (k === 2 ? 1 : k === 1 || k === 3 ? 0.9 : 0.6);
-      x.lineTo(Math.cos(a0) * L, Math.sin(a0) * L); x.lineTo(Math.cos(a1) * s * 0.35, Math.sin(a1) * s * 0.35);
-    }
-    x.lineTo(0, s * 0.25); x.closePath();
-    x.fillStyle = col; x.fill(); x.restore();
-  }
-  for (const [tx, ty] of tips) {
-    const n = 4 + Math.floor(R() * 7);
-    for (let i = 0; i < n; i++) {
-      const hue = R() < 0.7 ? `rgba(${200 + 40 * R() | 0},${60 + 50 * R() | 0},${35 + 20 * R() | 0},${0.30 + 0.25 * R()})`
-                            : `rgba(120,70,40,${0.25 + 0.2 * R()})`;
-      maple(tx + (R() - 0.5) * cell * 1.2, ty + (R() - 0.5) * cell * 1.0, cell * (0.12 + 0.12 * R()), R() * 6.3, hue);
-    }
-  }
-  }
-  const fromLeft = motif === "wanderer" ? false : fromLeftAst;
-  // Signatur-Stempel (kleines rotes Siegel) unten in einer Ecke
-  x.fillStyle = "rgba(170,40,30,0.55)";
-  const sx = fromLeft ? w - cell * 0.9 : cell * 0.6, sy = h - cell * 1.1;
-  x.fillRect(sx, sy, cell * 0.18, cell * 0.24);
-  // Tusche verlaeuft leicht ins Papier: Ebene einmal weich uebertragen + scharf darueber (Kern bleibt lesbar)
-  out.filter = "blur(" + Math.max(1, cell * 0.012).toFixed(1) + "px)"; out.drawImage(layer, 0, 0);
-  out.filter = "none"; out.globalAlpha = 0.55; out.drawImage(layer, 0, 0); out.globalAlpha = 1;
-  // Tusche -> Absorption: rgb = durchgelassene Farbe, a = Deckkraft
-  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, inkTex);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-}
-
-let COLS, cell, bright, kelv, energy, pix, started = false;
+let L = null, dpr = 1;                        // L: Lage des Laternenbilds auf dem Bildschirm
+const off = document.createElement("canvas"), oc = off.getContext("2d");      // Effekte, spaeter maskiert
+const ink = document.createElement("canvas"), ic = ink.getContext("2d");      // Tusche (Wanderer, Blaetter, Regen)
+const grainCv = document.createElement("canvas");
 function layout() {
-  const dpr = Math.min(devicePixelRatio || 1, 2);
+  dpr = Math.min(devicePixelRatio || 1, 2);
   cv.width = Math.round(innerWidth * dpr); cv.height = Math.round(innerHeight * dpr);
-  gl.viewport(0, 0, cv.width, cv.height);
-  const minMargin = Math.round(cv.height * 0.03);                 // Lackrahmen
-  cell = Math.floor((cv.height - 2 * minMargin) / ROWS);
-  COLS = Math.max(1, Math.floor((cv.width - 2 * minMargin) / cell));
-  const ox = Math.round((cv.width - COLS * cell) / 2), oy = Math.round((cv.height - ROWS * cell) / 2);
-  gl.uniform2f(U("uGrid"), COLS, ROWS); gl.uniform2f(U("uRes"), cv.width, cv.height);
-  gl.uniform1f(U("uCell"), cell); gl.uniform2f(U("uOrigin"), ox, oy);
-  const n = COLS * ROWS;
-  bright = new Float32Array(n); kelv = new Float32Array(n).fill(2300); energy = new Float32Array(n); pix = new Uint8Array(n * 4);
-  started = false;
-  paintInk(cv.width, cv.height, cell);
+  if (!G) return;
+  const s = Math.min(cv.width / G.width, cv.height / G.height);
+  L = { s, w: G.width * s, h: G.height * s };
+  L.x = (cv.width - L.w) / 2; L.y = (cv.height - L.h) / 2;
+  off.width = ink.width = cv.width; off.height = ink.height = cv.height;
+  grainCv.width = 256; grainCv.height = 256;
+  const gc = grainCv.getContext("2d"), id = gc.createImageData(256, 256);
+  for (let i = 0; i < id.data.length; i += 4) { const v = 110 + Math.random() * 40; id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255; }
+  gc.putImageData(id, 0, 0);
 }
+const P = (x, y) => [L.x + x * L.s, L.y + y * L.s];   // Foto-Koordinaten -> Bildschirm
+addEventListener("resize", layout);
 
-// ---------------------------------------------------------------- Audio (ueber Sekunden gemittelt)
-let analyser, fbin, bands = new Float32Array(NB), level = 0;
-const start = document.getElementById("start"), hud = document.getElementById("hud");
+// ---------------------------------------------------------------- Mikrofon (Pegel) + Spracherkennung
+let analyser, tbuf, level = 0, levelFast = 0, floorL = 0.02;
 async function startAudio() {
-  if (demo) { start.hidden = true; return; }
+  start.hidden = true;
+  if (demo) return;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
     const ac = new (window.AudioContext || window.webkitAudioContext)(); await ac.resume();
-    analyser = ac.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.6;
-    ac.createMediaStreamSource(stream).connect(analyser);
-    fbin = new Uint8Array(analyser.frequencyBinCount); start.hidden = true;
-  } catch (e) {
-    start.textContent = "Kein Mikrofon (" + e.name + ") – Demo läuft. Taste D wechselt.";
-    demo = true; setTimeout(() => (start.hidden = true), 3000);
-  }
+    analyser = ac.createAnalyser(); analyser.fftSize = 1024;
+    ac.createMediaStreamSource(stream).connect(analyser); tbuf = new Float32Array(analyser.fftSize);
+  } catch (e) { demo = true; }
+  startSpeech();
 }
 start.addEventListener("click", startAudio);
 startAudio();
-const edges = []; for (let i = 0; i <= NB; i++) edges.push(40 * Math.pow(12000 / 40, i / NB));
-let gPeak = 0.1; const floor = new Float32Array(NB).fill(0.02);
-function readAudio(t) {
-  const raw = new Float32Array(NB);
-  if (demo || !analyser) {
-    for (let i = 0; i < NB; i++) raw[i] = 0.35 + 0.3 * Math.sin(t * 0.4 - i * 0.5) + 0.15 * Math.sin(t * 1.1 + i);
-  } else {
-    analyser.getByteFrequencyData(fbin);
-    const hz = analyser.context.sampleRate / analyser.fftSize;
-    for (let i = 0; i < NB; i++) {
-      const a = Math.max(1, Math.floor(edges[i] / hz)), b = Math.max(a + 1, Math.floor(edges[i + 1] / hz));
-      let s = 0; for (let k = a; k < b; k++) s += fbin[k]; raw[i] = s / (b - a) / 255;
-    }
-  }
-  let mx = 0;
-  for (let i = 0; i < NB; i++) {
-    floor[i] += (raw[i] - floor[i]) * (raw[i] < floor[i] ? 0.2 : 0.0015);
-    raw[i] = Math.max(0, raw[i] - floor[i] * 1.2); mx = Math.max(mx, raw[i]);
-  }
-  gPeak = Math.max(mx, gPeak * 0.998, 0.04);
-  let sum = 0;
-  for (let i = 0; i < NB; i++) {
-    const v = Math.min(1, Math.pow(raw[i] / gPeak, 1.3));
-    bands[i] += (v - bands[i]) * (v > bands[i] ? 0.04 : 0.015); sum += bands[i];
-  }
-  level += (sum / NB - level) * 0.01;
+function readLevel(t) {
+  let v = 0;
+  if (analyser) {
+    analyser.getFloatTimeDomainData(tbuf);
+    let s = 0; for (let i = 0; i < tbuf.length; i++) s += tbuf[i] * tbuf[i];
+    v = Math.sqrt(s / tbuf.length);
+    floorL += (v - floorL) * (v < floorL ? 0.05 : 0.0005);
+    v = Math.max(0, v - floorL * 1.3) * 9;
+  } else v = 0.25 + 0.25 * Math.sin(t * 0.7) + 0.1 * Math.sin(t * 2.3);
+  v = Math.min(1, v);
+  levelFast += (v - levelFast) * 0.25;
+  level += (v - level) * 0.03;
 }
 
-// ---------------------------------------------------------------- Feld je Kumiko-Feld (sanft) + zwei Lichtquellen
-function vnoise(x, y) {
-  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
-  const h = (a, b) => { const s = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return s - Math.floor(s); };
-  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
-  return (h(xi, yi) * (1 - u) + h(xi + 1, yi) * u) * (1 - v) + (h(xi, yi + 1) * (1 - u) + h(xi + 1, yi + 1) * u) * v;
+// Sprachbefehle (Chrome: Web Speech API). Gleiche Wirkung ueber Tasten 1-9.
+const state = { wind: 0, rain: 0, night: 0, day: 0, snow: 0, dance: 0, bow: 0, hello: 0 };
+for (const k of (q.get("fx") || "").split(",")) if (k in state) state[k] = 1;   // z.B. ?fx=night,wind
+const KEYWORDS = [
+  [/\bwind|sturm|wehen/, "wind", "Wind"], [/\bregen|regnet|tropf/, "rain", "Regen"], [/\bmond|nacht|dunkel|abend/, "night", "Nacht"],
+  [/\bsonne|morgen|\btag\b|hell|licht/, "day", "Licht"], [/\bschnee|schneit|winter/, "snow", "Schnee"],
+  [/schmetterling|falter|tanz/, "dance", "Schmetterling"], [/wanderer|\bgeh|\bweg\b|reise|verbeug/, "bow", "Wanderer"],
+  [/\bhallo|\bhoi\b|grüezi|guten|\bhey\b/, "hello", "Hallo"], [/\bstill|ruhe|leise|stopp|genug/, "calm", "Ruhe"],
+];
+function trigger(key, label) {
+  if (key === "calm") { for (const k in state) state[k] = 0; }
+  else if (key === "night") { state.night = 1; state.day = 0; }
+  else if (key === "day") { state.day = 1; state.night = 0; }
+  else state[key] = 1;
+  wordEl.textContent = label; wordEl.classList.add("on");
+  clearTimeout(trigger.tm); trigger.tm = setTimeout(() => wordEl.classList.remove("on"), 2200);
 }
-let flow = 0;
-function update(t, dt) {
-  flow += dt * (0.03 + 0.05 * level);
-  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
-    const i = r * COLS + c, b = bands[Math.min(NB - 1, Math.floor((c / COLS) * NB))];
-    let target, k;
-    if (mode === "glut") {
-      const below = r > 0 ? energy[i - COLS] : b * 1.2;
-      energy[i] += (below * 0.97 - energy[i]) * 0.025;
-      target = 0.25 + 0.75 * Math.min(1, energy[i]); k = 1800 + 1800 * Math.min(1, energy[i]);
-    } else {
-      const base = vnoise(c * 0.35 + flow, r * 0.45 - flow * 0.6) * 0.65 + vnoise(c * 0.9 - flow * 1.3, r * 0.9 + 3) * 0.35;
-      const sp = Math.min(1, Math.max(0, (base - 0.28) / 0.44)), shaped = sp * sp * (3 - 2 * sp);
-      target = 0.12 + 0.75 * Math.pow(shaped, 1.2) + (mode === "feld" ? 0.2 * b : 0.08 * b);
-      k = 2000 + 1500 * b + 500 * base;
+function startSpeech() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return;
+  const rec = new SR(); rec.lang = "de-CH"; rec.continuous = true; rec.interimResults = true;
+  rec.onresult = ev => {
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      const txt = ev.results[i][0].transcript.toLowerCase();
+      for (const [re, key, label] of KEYWORDS) if (re.test(txt)) { trigger(key, label); break; }
     }
-    target = Math.min(1, target); k = Math.max(K_MIN, Math.min(K_MAX, k));
-    if (!started) { bright[i] = target; kelv[i] = k; }
-    bright[i] += (target - bright[i]) * (target > bright[i] ? 0.03 : 0.018);
-    kelv[i] += (k - kelv[i]) * 0.01;
-    const [R, G, B] = kelvinRGB(kelv[i]), br = Math.sqrt(bright[i]);
-    pix[i * 4] = 255 * Math.sqrt(R) * br; pix[i * 4 + 1] = 255 * Math.sqrt(G) * br; pix[i * 4 + 2] = 255 * Math.sqrt(B) * br; pix[i * 4 + 3] = 255;
-  }
-  started = true;
-  // Lichtquellen (wie Gluehbirnen hinter dem Papier): wandern kaum, atmen mit der Lautstaerke
-  const W = cv.width, H = cv.height, s = 0.85 + 0.35 * level + (mode === "wellen" ? 0.12 * Math.sin(t * 0.6) : 0);
-  gl.uniform1f(U("uFlicker"), 1 + 0.025 * Math.sin(t * 2.3) * Math.sin(t * 0.71) + 0.012 * Math.sin(t * 7.9));
-  gl.uniform4f(U("uLamp0"), W * (0.46 + 0.05 * Math.sin(t * 0.05)), H * (0.50 + 0.04 * Math.cos(t * 0.04)), H * 0.48, 1.6 * s);
-  gl.uniform4f(U("uLamp1"), W * (0.60 + 0.06 * Math.sin(t * 0.037 + 2)), H * (0.44 + 0.05 * Math.sin(t * 0.03)), H * 0.26, 0.7 * s);
-}
-
-// ---------------------------------------------------------------- Schleife + Bedienung
-let last = performance.now(), T = 0, hudTimer;
-function loop(now) {
-  const dt = Math.min(0.05, (now - last) / 1000); last = now; T += dt;
-  readAudio(T); update(T, dt); drawWanderer(T);
-  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, dataTex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, COLS, ROWS, 0, gl.RGBA, gl.UNSIGNED_BYTE, pix);
-  gl.uniform1f(U("uTime"), T); gl.uniform1f(U("uPaint"), paint);
-  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-  requestAnimationFrame(loop);
-}
-function showHud() {
-  hud.innerHTML = `<b>${{ feld: "Feld", glut: "Glut", wellen: "Atem" }[mode]}</b> · <kbd>1</kbd> Feld <kbd>2</kbd> Glut <kbd>3</kbd> Atem · <kbd>W</kbd> Motiv (${motif === "wanderer" ? "Wanderer" : "Ast"}) · <kbd>M</kbd> Malerei ${paint ? "aus" : "an"} · <kbd>N</kbd> neu · <kbd>D</kbd> ${demo ? "Mikrofon" : "Demo"}`;
-  document.body.classList.add("show-hud"); clearTimeout(hudTimer);
-  hudTimer = setTimeout(() => document.body.classList.remove("show-hud"), 2500);
+  };
+  rec.onend = () => setTimeout(() => { try { rec.start(); } catch (e) {} }, 400);
+  rec.onerror = () => {};
+  try { rec.start(); } catch (e) {}
 }
 addEventListener("keydown", e => {
-  const k = e.key.toLowerCase();
-  if (k === "1") mode = "feld"; else if (k === "2") mode = "glut"; else if (k === "3") mode = "wellen";
-  else if (k === "m") paint = paint ? 0 : 1;
-  else if (k === "n") { seed = Math.floor(Math.random() * 1e6); paintInk(cv.width, cv.height, cell); }
-  else if (k === "w") { motif = motif === "wanderer" ? "ast" : "wanderer"; paintInk(cv.width, cv.height, cell); }
-  else if (k === "d") { demo = !demo; if (!demo && !analyser) startAudio(); }
-  else return;
+  const m = { 1: "wind", 2: "rain", 3: "night", 4: "day", 5: "snow", 6: "dance", 7: "bow", 8: "hello", 9: "calm" }[e.key];
+  if (m) trigger(m, m); else if (e.key.toLowerCase() === "d") demo = !demo;
   showHud();
 });
+let hudTimer;
+function showHud() {
+  hud.innerHTML = `Sprich: <b>Wind · Regen · Nacht · Licht · Schnee · Schmetterling · Wanderer · Hallo · Ruhe</b> · Tasten <kbd>1</kbd>–<kbd>9</kbd>`;
+  document.body.classList.add("show-hud"); clearTimeout(hudTimer);
+  hudTimer = setTimeout(() => document.body.classList.remove("show-hud"), 3000);
+}
 addEventListener("mousemove", showHud);
-addEventListener("resize", layout);
-layout(); requestAnimationFrame(loop);
+
+// ---------------------------------------------------------------- Ablauf der Effekte (weich ein/aus)
+const fx = { wind: 0, rain: 0, night: 0, day: 0, snow: 0, dance: 0, bow: 0, hello: 0 };
+const decay = { wind: 10, rain: 14, snow: 18, dance: 7, bow: 4, hello: 2.5, night: 1e9, day: 1e9 };
+const since = {};
+function stepFx(t) {
+  for (const k in fx) {
+    if (state[k]) { since[k] = since[k] ?? t; if (t - since[k] > decay[k]) state[k] = 0; }
+    else since[k] = undefined;
+    fx[k] += ((state[k] ? 1 : 0) - fx[k]) * (state[k] ? 0.04 : 0.02);
+  }
+}
+
+// ---------------------------------------------------------------- Tusche-Helfer (Pinselstrich wie das Blattwerk auf dem Papier)
+function brush(c, pts, width, alpha, bristles, R) {
+  c.lineCap = "round"; c.lineJoin = "round";
+  for (let b = 0; b < bristles; b++) {
+    const o = (b / (bristles - 1) - 0.5) * width * 0.9;
+    c.strokeStyle = `rgba(42,36,32,${alpha * (0.5 + 0.6 * R())})`; c.lineWidth = Math.max(0.6, width * 0.3);
+    c.beginPath();
+    for (let i = 0; i < pts.length; i++) {
+      const [x, y] = pts[i], prev = pts[Math.max(0, i - 1)];
+      const nx = -(y - prev[1]), ny = x - prev[0], nl = Math.hypot(nx, ny) || 1;
+      const px = x + nx / nl * o, py = y + ny / nl * o;
+      if (i === 0) c.moveTo(px, py); else c.lineTo(px, py);
+    }
+    c.stroke();
+  }
+}
+function wash(c, x, y, rx, ry, rot, alpha) {
+  c.save(); c.translate(x, y); c.rotate(rot);
+  const g = c.createRadialGradient(0, 0, 0, 0, 0, Math.max(rx, ry));
+  g.addColorStop(0, `rgba(48,40,36,${alpha})`); g.addColorStop(0.7, `rgba(48,40,36,${alpha * 0.55})`); g.addColorStop(1, "rgba(48,40,36,0)");
+  c.fillStyle = g; c.beginPath(); c.ellipse(0, 0, rx, ry, 0, 0, 7); c.fill(); c.restore();
+}
+function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+// ---------------------------------------------------------------- Wanderer: Tuschefigur mit Kasa, wehendem Gewand, Stab, Kuerbis
+let walkerT = +(q.get("start") || 0.3);          // Startposition (0 = links hinter dem Rahmen)
+function drawWalker(c, t, dt) {
+  const [wx0, wy0, wx1, wy1] = G.window;
+  const H = (wy1 - wy0) * 0.25 * L.s;                            // Figurhoehe
+  const speed = (1 - 0.7 * fx.bow) * (0.028 + 0.012 * level);    // Fensterbreiten pro Sekunde
+  walkerT += dt * speed;
+  const u = walkerT % 1.35 - 0.15;                               // hinter dem Rahmen ein- und austreten
+  const groundY = wy1 - (wy1 - wy0) * 0.055;
+  const [X, Y] = P(wx0 + u * (wx1 - wx0), groundY + 6 * Math.sin(u * 9));
+  const ph = walkerT * 2 * Math.PI * 9;                          // Schrittphase
+  const R = mulberry(Math.floor(t * 8));                         // ruhiges Zittern der Tusche
+  c.save(); c.translate(X, Y);
+  c.rotate(0.08 + 0.25 * fx.wind + 0.35 * fx.bow);               // gegen den Wind / Verbeugung
+  const bob = -Math.abs(Math.cos(ph)) * H * 0.02;
+  for (let k = 0; k < 2; k++) {                                  // Beine mit Knie, Fuesse als Tupfer
+    const sw = Math.sin(ph + k * Math.PI), a = 0.42 * sw, bend = 0.6 * Math.max(0, -Math.cos(ph + k * Math.PI));
+    const hip = [0, -H * 0.45 + bob], knee = [Math.sin(a) * H * 0.22, hip[1] + Math.cos(a) * H * 0.22];
+    const foot = [knee[0] + Math.sin(a - bend) * H * 0.24, Math.min(0, knee[1] + Math.cos(a - bend) * H * 0.24)];
+    brush(c, [hip, knee, foot], H * 0.05, 0.55, 4, R);
+    wash(c, foot[0] + H * 0.02, foot[1], H * 0.045, H * 0.018, 0, 0.5);
+  }
+  const flare = H * (0.16 + 0.12 * fx.wind), sway = Math.sin(ph) * H * 0.02 - fx.wind * H * 0.06;   // Gewand
+  c.beginPath();
+  c.moveTo(-H * 0.08, -H * 0.80 + bob); c.lineTo(H * 0.09, -H * 0.80 + bob);
+  c.bezierCurveTo(H * 0.16, -H * 0.6 + bob, H * 0.14 + sway, -H * 0.45 + bob, H * 0.11 + sway * 0.6, -H * 0.36 + bob);
+  c.lineTo(-flare + sway, -H * 0.34 + bob);
+  c.bezierCurveTo(-H * 0.16, -H * 0.5 + bob, -H * 0.12, -H * 0.65 + bob, -H * 0.08, -H * 0.80 + bob);
+  c.closePath();
+  const gg = c.createLinearGradient(-flare, 0, H * 0.1, 0);
+  gg.addColorStop(0, "rgba(42,36,32,0.45)"); gg.addColorStop(1, "rgba(42,36,32,0.72)");
+  c.fillStyle = gg; c.fill();
+  wash(c, -H * 0.13, -H * 0.70 + bob, H * 0.075, H * 0.09, -0.4, 0.75);            // Buendel
+  wash(c, H * 0.01, -H * 0.86 + bob, H * 0.05, H * 0.055, 0, 0.8);                 // Kopf
+  c.beginPath(); c.moveTo(-H * 0.21, -H * 0.86 + bob);                             // Kasa
+  c.quadraticCurveTo(0, -H * 1.02 + bob, H * 0.23, -H * 0.86 + bob);
+  c.quadraticCurveTo(H * 0.01, -H * 0.83 + bob, -H * 0.21, -H * 0.86 + bob); c.closePath();
+  c.fillStyle = "rgba(42,36,32,0.78)"; c.fill();
+  const armA = 0.3 * Math.sin(ph), sh = [H * 0.03, -H * 0.76 + bob];               // Arme + Stab
+  const hand = [sh[0] + Math.sin(0.55 + armA) * H * 0.2, sh[1] + Math.cos(0.55 + armA) * H * 0.2];
+  brush(c, [sh, hand], H * 0.045, 0.6, 4, R);
+  brush(c, [[sh[0] - H * 0.02, sh[1]], [sh[0] - H * 0.02 - Math.sin(armA) * H * 0.15, sh[1] + H * 0.16]], H * 0.04, 0.5, 4, R);
+  const stTop = [hand[0] - H * 0.02, hand[1] - H * 0.3], stBot = [hand[0] + H * 0.07, 0];
+  brush(c, [stTop, stBot], H * 0.022, 0.75, 3, R);
+  const gsw = Math.sin(ph * 0.5) * 0.2 + fx.wind * 0.4;                            // Kuerbisflasche am Stab
+  wash(c, stTop[0] + Math.sin(gsw) * H * 0.07, stTop[1] + H * 0.06 + Math.cos(gsw) * H * 0.06, H * 0.03, H * 0.04, 0, 0.7);
+  c.restore();
+}
+
+// ---------------------------------------------------------------- Schmetterling (wie im Foto: gelb mit dunklen Tupfen)
+const bf = { x: 0, y: 0, tx: 0, ty: 0, ph: 0, init: false };
+function drawButterfly(c, t, dt) {
+  const [bx, by, br] = G.butterfly;
+  if (!bf.init) { bf.x = bx; bf.y = by; bf.tx = bx; bf.ty = by; bf.init = true; }
+  const [wx0, wy0, wx1, wy1] = G.window;
+  const active = 0.15 + 0.85 * levelFast + fx.dance;              // Stimme laesst ihn flattern
+  if (Math.random() < dt * (0.15 + 1.5 * active)) {
+    if (fx.dance > 0.5) { bf.tx = (wx0 + wx1) / 2 + (Math.random() - 0.5) * (wx1 - wx0) * 0.35; bf.ty = (wy0 + wy1) / 2 + (Math.random() - 0.5) * (wy1 - wy0) * 0.3; }
+    else { bf.tx = bx + (Math.random() - 0.5) * br * (3 + 12 * active); bf.ty = by + (Math.random() - 0.5) * br * (2 + 8 * active); }
+    bf.tx = Math.min(wx1 - br, Math.max(wx0 + br, bf.tx)); bf.ty = Math.min(wy1 - br, Math.max(wy0 + br, bf.ty));
+  }
+  const k = 0.6 + 2.5 * active;
+  bf.x += (bf.tx - bf.x) * Math.min(1, dt * k); bf.y += (bf.ty - bf.y) * Math.min(1, dt * k) + Math.sin(t * 5) * 0.4;
+  bf.ph += dt * (6 + 22 * active);
+  const [X, Y] = P(bf.x, bf.y), s = br * L.s * 0.55, flap = 0.35 + 0.65 * Math.abs(Math.sin(bf.ph));
+  c.save(); c.translate(X, Y); c.rotate(0.3 + 0.15 * Math.sin(t * 1.3));
+  for (const side of [-1, 1]) {
+    c.save(); c.scale(side * flap, 1);
+    c.fillStyle = "rgba(196,170,60,0.82)";
+    c.beginPath(); c.moveTo(0, 0); c.bezierCurveTo(s * 0.9, -s * 1.1, s * 1.5, -s * 0.2, s * 0.35, s * 0.15); c.closePath(); c.fill();
+    c.beginPath(); c.moveTo(0, 0); c.bezierCurveTo(s * 0.7, s * 0.2, s * 0.9, s * 0.9, s * 0.15, s * 0.6); c.closePath(); c.fill();
+    c.fillStyle = "rgba(40,34,30,0.75)";
+    for (const [dx, dy, r] of [[0.55, -0.45, 0.09], [0.9, -0.25, 0.07], [0.45, 0.35, 0.07], [0.75, 0.05, 0.06], [0.25, -0.65, 0.05]]) {
+      c.beginPath(); c.arc(dx * s, dy * s, r * s, 0, 7); c.fill();
+    }
+    c.restore();
+  }
+  c.fillStyle = "rgba(40,34,30,0.8)"; c.beginPath(); c.ellipse(0, 0, s * 0.07, s * 0.35, 0, 0, 7); c.fill();
+  c.restore();
+}
+
+// ---------------------------------------------------------------- Blaetter, Regen, Schnee, Gluehwuermchen
+const petals = [], drops = [], flakes = [], flies = [];
+function stepParticles(t, dt) {
+  const [wx0, wy0, wx1, wy1] = G.window, W = wx1 - wx0, Hh = wy1 - wy0;
+  if (fx.wind > 0.2 && Math.random() < dt * 6 * fx.wind)
+    petals.push({ x: wx0 + W * (0.55 + 0.4 * Math.random()), y: wy0 + Hh * (0.55 + 0.4 * Math.random()), vx: -W * (0.08 + 0.1 * Math.random()), vy: -Hh * 0.05, r: Math.random() * 7, s: 8 + 8 * Math.random(), a: 1 });
+  for (const p of petals) { p.vx += (Math.random() - 0.7) * W * dt * 0.1; p.vy += Hh * dt * 0.05 + (Math.random() - 0.5) * Hh * dt * 0.15; p.x += p.vx * dt; p.y += p.vy * dt; p.r += dt * 3; p.a -= dt * 0.12; }
+  for (let i = petals.length - 1; i >= 0; i--) if (petals[i].a <= 0 || petals[i].x < wx0 - 50) petals.splice(i, 1);
+  if (fx.rain > 0.2 && Math.random() < dt * 60 * fx.rain) drops.push({ x: wx0 + Math.random() * W, y: wy0 - 20, v: Hh * (0.9 + 0.4 * Math.random()) });
+  for (const d of drops) d.y += d.v * dt;
+  for (let i = drops.length - 1; i >= 0; i--) if (drops[i].y > wy1) drops.splice(i, 1);
+  if (fx.snow > 0.2 && Math.random() < dt * 25 * fx.snow) flakes.push({ x: wx0 + Math.random() * W, y: wy0 - 10, v: Hh * (0.04 + 0.03 * Math.random()), ph: Math.random() * 7, s: 2 + 3 * Math.random() });
+  for (const f of flakes) { f.y += f.v * dt; f.x += Math.sin(t * 0.8 + f.ph) * 6 * dt; }
+  for (let i = flakes.length - 1; i >= 0; i--) if (flakes[i].y > wy1) flakes.splice(i, 1);
+  const wantFlies = Math.round(2 + 9 * fx.night);
+  while (flies.length < wantFlies) flies.push({ x: wx0 + Math.random() * W, y: wy0 + Hh * (0.3 + 0.6 * Math.random()), ph: Math.random() * 7, ph2: Math.random() * 7 });
+  while (flies.length > wantFlies) flies.pop();
+  for (const f of flies) { f.x += Math.sin(t * 0.37 + f.ph) * 9 * dt; f.y += Math.cos(t * 0.29 + f.ph2) * 7 * dt; }
+}
+function maskLayer(c) { c.globalCompositeOperation = "destination-in"; c.drawImage(maskImg, L.x, L.y, L.w, L.h); c.globalCompositeOperation = "source-over"; }
+
+// ---------------------------------------------------------------- Bild
+let last = performance.now(), T = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now; T += dt;
+  requestAnimationFrame(frame);
+  if (!ready || !L) return;
+  readLevel(T); stepFx(T); stepParticles(T, dt);
+  const W = cv.width, H = cv.height, [lr, lg, lb] = G.lacquer;
+
+  // 1) Lack ringsum (Farbe aus dem Foto) mit leichtem Glanz, dann das Foto der Laterne
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, `rgb(${lr * 0.9 | 0},${lg * 0.9 | 0},${lb * 0.9 | 0})`); bg.addColorStop(0.5, `rgb(${lr * 1.25 | 0},${lg * 1.2 | 0},${lb * 1.15 | 0})`); bg.addColorStop(1, `rgb(${lr * 0.8 | 0},${lg * 0.8 | 0},${lb * 0.8 | 0})`);
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(img, L.x, L.y, L.w, L.h);
+  // Fotoraender weich in den Lack auslaufen lassen
+  const lac = `rgb(${lr * 1.1 | 0},${lg * 1.1 | 0},${lb * 1.05 | 0})`, fw = L.w * 0.06;
+  for (const [x0, x1] of [[L.x, L.x + fw], [L.x + L.w, L.x + L.w - fw]]) {
+    const g = ctx.createLinearGradient(x0, 0, x1, 0); g.addColorStop(0, lac); g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g; ctx.fillRect(Math.min(x0, x1), L.y, fw, L.h);
+  }
+  for (const [y0, y1] of [[L.y, L.y + fw], [L.y + L.h, L.y + L.h - fw]]) {
+    const g = ctx.createLinearGradient(0, y0, 0, y1); g.addColorStop(0, lac); g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g; ctx.fillRect(L.x, Math.min(y0, y1), L.w, fw);
+  }
+
+  // 2) Licht hinter dem Papier: atmet mit der Stimme, flackert wie eine Gluehbirne; Nacht dunkler, Tag heller
+  const flick = 1 + 0.03 * Math.sin(T * 2.1) * Math.sin(T * 0.63) + 0.015 * Math.sin(T * 9.1);
+  const breath = (0.92 + 0.18 * level + 0.12 * levelFast) * flick;
+  const gain = breath * (1 - 0.45 * fx.night + 0.22 * fx.day) + fx.hello * 0.25 * Math.max(0, Math.sin(T * 6));
+  const [gx, gy] = P(G.glow[0], G.glow[1]);
+  if (gain < 1) {
+    oc.clearRect(0, 0, W, H);
+    oc.fillStyle = `rgba(20,10,5,${Math.min(0.7, (1 - gain) * 1.2)})`; oc.fillRect(0, 0, W, H); maskLayer(oc);
+    ctx.globalCompositeOperation = "multiply"; ctx.drawImage(off, 0, 0); ctx.globalCompositeOperation = "source-over";
+  }
+  oc.clearRect(0, 0, W, H);
+  if (gain > 1) {
+    const g = oc.createRadialGradient(gx, gy, 0, gx, gy, L.h * 0.45), a = Math.min(0.55, (gain - 1) * 1.6);
+    g.addColorStop(0, `rgba(255,190,110,${a})`); g.addColorStop(1, "rgba(255,190,110,0)");
+    oc.fillStyle = g; oc.fillRect(0, 0, W, H);
+  }
+  if (fx.night > 0.05) {                                          // Mond scheint blass durchs Papier, Gluehwuermchen
+    const [wx0, wy0, wx1, wy1] = G.window, [mx, my] = P(wx0 + (wx1 - wx0) * 0.24, wy0 + (wy1 - wy0) * 0.2), mr = (wy1 - wy0) * L.s * 0.075;
+    const g = oc.createRadialGradient(mx, my, mr * 0.2, mx, my, mr * 2.2);
+    g.addColorStop(0, `rgba(255,236,200,${0.55 * fx.night})`); g.addColorStop(0.45, `rgba(255,230,190,${0.22 * fx.night})`); g.addColorStop(1, "rgba(255,230,190,0)");
+    oc.fillStyle = g; oc.beginPath(); oc.arc(mx, my, mr * 2.2, 0, 7); oc.fill();
+    for (const f of flies) {
+      const [fxp, fyp] = P(f.x, f.y), a = fx.night * (0.35 + 0.35 * Math.sin(T * 2.2 + f.ph)) * (0.7 + 0.6 * levelFast), r = 18 * L.s;
+      const gg = oc.createRadialGradient(fxp, fyp, 0, fxp, fyp, r);
+      gg.addColorStop(0, `rgba(255,220,140,${a})`); gg.addColorStop(1, "rgba(255,220,140,0)");
+      oc.fillStyle = gg; oc.beginPath(); oc.arc(fxp, fyp, r, 0, 7); oc.fill();
+    }
+  }
+  maskLayer(oc);
+  ctx.globalCompositeOperation = "screen"; ctx.drawImage(off, 0, 0); ctx.globalCompositeOperation = "source-over";
+
+  // 3) Tusche hinter dem Papier: Wanderer, Blaetter, Regen (weich, multipliziert)
+  ic.clearRect(0, 0, W, H);
+  drawWalker(ic, T, dt);
+  for (const p of petals) { ic.save(); ic.translate(...P(p.x, p.y)); ic.rotate(p.r); ic.fillStyle = `rgba(150,60,40,${0.45 * p.a})`; ic.beginPath(); ic.ellipse(0, 0, p.s * L.s * 0.9, p.s * L.s * 0.45, 0, 0, 7); ic.fill(); ic.restore(); }
+  if (fx.rain > 0.05) { ic.strokeStyle = `rgba(60,52,48,${0.28 * fx.rain})`; ic.lineWidth = 1.2 * L.s; ic.beginPath(); for (const d of drops) { const [x, y] = P(d.x, d.y); ic.moveTo(x, y); ic.lineTo(x - 4 * L.s, y - 26 * L.s); } ic.stroke(); }
+  ic.filter = `blur(${(1.2 * L.s).toFixed(1)}px)`; ic.drawImage(ink, 0, 0); ic.filter = "none";   // Tusche verlaeuft ins Papier
+  maskLayer(ic);
+  ctx.globalCompositeOperation = "multiply"; ctx.drawImage(ink, 0, 0); ctx.globalCompositeOperation = "source-over";
+
+  // 4) Vorne auf dem Papier: Schmetterling, Schnee
+  oc.clearRect(0, 0, W, H);
+  drawButterfly(oc, T, dt);
+  if (fx.snow > 0.05) { oc.fillStyle = `rgba(255,248,235,${0.7 * fx.snow})`; for (const f of flakes) { const [x, y] = P(f.x, f.y); oc.beginPath(); oc.arc(x, y, f.s * L.s, 0, 7); oc.fill(); } }
+  maskLayer(oc);
+  ctx.drawImage(off, 0, 0);
+
+  // 5) Filmkorn, sehr leicht
+  const pat = ctx.createPattern(grainCv, "repeat"); pat.setTransform(new DOMMatrix().translate((T * 137) % 256, (T * 91) % 256));
+  ctx.globalCompositeOperation = "overlay"; ctx.globalAlpha = 0.09; ctx.fillStyle = pat; ctx.fillRect(0, 0, W, H);
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
+}
+requestAnimationFrame(frame);
 </script>
 </body>
 </html>
