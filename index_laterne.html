@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Andon Wanderer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0d0907; overflow: hidden; cursor: none; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; left: 18px; bottom: 16px; font: 12px/1.6 -apple-system, "Helvetica Neue", sans-serif;
+         color: #e8cfa8; text-shadow: 0 1px 3px #000; opacity: 0; transition: opacity .8s; pointer-events: none; }
+  body.show-hud #hud { opacity: .9; }
+  kbd { border: 1px solid rgba(232,207,168,.5); padding: 0 5px; border-radius: 3px; }
+  #word { position: fixed; right: 22px; bottom: 18px; font: italic 15px Georgia, serif; color: #f0d9b5;
+          text-shadow: 0 1px 4px #000; opacity: 0; transition: opacity .6s; pointer-events: none; }
+  #word.on { opacity: .8; }
+  #start { position: fixed; inset: 0; display: grid; place-items: center; font: 15px -apple-system, sans-serif;
+           color: #f3e2c6; background: rgba(13,9,7,.35); cursor: pointer; text-shadow: 0 1px 4px #000; text-align: center; }
+  #start[hidden] { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="start">Klicken, um Mikrofon und Spracherkennung zu starten</div>
+<div id="hud"></div>
+<div id="word"></div>
+<script>
+"use strict";
+const q = new URLSearchParams(location.search);
+let demo = q.get("demo") === "1";
+const cv = document.getElementById("c"), ctx = cv.getContext("2d");
+const hud = document.getElementById("hud"), wordEl = document.getElementById("word"), start = document.getElementById("start");
+
+// ---------------------------------------------------------------- Bilder + Geometrie (aus dem Foto der Laterne)
+const img = new Image(), maskImg = new Image();
+let G = null, ready = false;
+Promise.all([
+  fetch("assets/geometry.json").then(r => r.json()).then(j => (G = j)),
+  new Promise(res => { img.onload = res; img.src = "assets/lantern.jpg"; }),
+  new Promise(res => { maskImg.onload = res; maskImg.src = "assets/mask.png"; }),
+]).then(() => { ready = true; layout(); });
+
+let L = null, dpr = 1;                        // L: Lage des Laternenbilds auf dem Bildschirm
+const off = document.createElement("canvas"), oc = off.getContext("2d");      // Effekte, spaeter maskiert
+const ink = document.createElement("canvas"), ic = ink.getContext("2d");      // Tusche (Wanderer, Blaetter, Regen)
+const grainCv = document.createElement("canvas");
+function layout() {
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  cv.width = Math.round(innerWidth * dpr); cv.height = Math.round(innerHeight * dpr);
+  if (!G) return;
+  const s = Math.min(cv.width / G.width, cv.height / G.height);
+  L = { s, w: G.width * s, h: G.height * s };
+  L.x = (cv.width - L.w) / 2; L.y = (cv.height - L.h) / 2;
+  off.width = ink.width = cv.width; off.height = ink.height = cv.height;
+  grainCv.width = 256; grainCv.height = 256;
+  const gc = grainCv.getContext("2d"), id = gc.createImageData(256, 256);
+  for (let i = 0; i < id.data.length; i += 4) { const v = 110 + Math.random() * 40; id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255; }
+  gc.putImageData(id, 0, 0);
+}
+const P = (x, y) => [L.x + x * L.s, L.y + y * L.s];   // Foto-Koordinaten -> Bildschirm
+addEventListener("resize", layout);
+
+// ---------------------------------------------------------------- Mikrofon (Pegel) + Spracherkennung
+let analyser, tbuf, level = 0, levelFast = 0, floorL = 0.02;
+async function startAudio() {
+  start.hidden = true;
+  if (demo) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    const ac = new (window.AudioContext || window.webkitAudioContext)(); await ac.resume();
+    analyser = ac.createAnalyser(); analyser.fftSize = 1024;
+    ac.createMediaStreamSource(stream).connect(analyser); tbuf = new Float32Array(analyser.fftSize);
+  } catch (e) { demo = true; }
+  startSpeech();
+}
+start.addEventListener("click", startAudio);
+startAudio();
+function readLevel(t) {
+  let v = 0;
+  if (analyser) {
+    analyser.getFloatTimeDomainData(tbuf);
+    let s = 0; for (let i = 0; i < tbuf.length; i++) s += tbuf[i] * tbuf[i];
+    v = Math.sqrt(s / tbuf.length);
+    floorL += (v - floorL) * (v < floorL ? 0.05 : 0.0005);
+    v = Math.max(0, v - floorL * 1.3) * 9;
+  } else v = 0.25 + 0.25 * Math.sin(t * 0.7) + 0.1 * Math.sin(t * 2.3);
+  v = Math.min(1, v);
+  levelFast += (v - levelFast) * 0.25;
+  level += (v - level) * 0.03;
+}
+
+// Sprachbefehle (Chrome: Web Speech API). Gleiche Wirkung ueber Tasten 1-9.
+const state = { wind: 0, rain: 0, night: 0, day: 0, snow: 0, dance: 0, bow: 0, hello: 0 };
+for (const k of (q.get("fx") || "").split(",")) if (k in state) state[k] = 1;   // z.B. ?fx=night,wind
+const KEYWORDS = [
+  [/\bwind|sturm|wehen/, "wind", "Wind"], [/\bregen|regnet|tropf/, "rain", "Regen"], [/\bmond|nacht|dunkel|abend/, "night", "Nacht"],
+  [/\bsonne|morgen|\btag\b|hell|licht/, "day", "Licht"], [/\bschnee|schneit|winter/, "snow", "Schnee"],
+  [/schmetterling|falter|tanz/, "dance", "Schmetterling"], [/wanderer|\bgeh|\bweg\b|reise|verbeug/, "bow", "Wanderer"],
+  [/\bhallo|\bhoi\b|grüezi|guten|\bhey\b/, "hello", "Hallo"], [/\bstill|ruhe|leise|stopp|genug/, "calm", "Ruhe"],
+];
+function trigger(key, label) {
+  if (key === "calm") { for (const k in state) state[k] = 0; }
+  else if (key === "night") { state.night = 1; state.day = 0; }
+  else if (key === "day") { state.day = 1; state.night = 0; }
+  else state[key] = 1;
+  wordEl.textContent = label; wordEl.classList.add("on");
+  clearTimeout(trigger.tm); trigger.tm = setTimeout(() => wordEl.classList.remove("on"), 2200);
+}
+function startSpeech() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return;
+  const rec = new SR(); rec.lang = "de-CH"; rec.continuous = true; rec.interimResults = true;
+  rec.onresult = ev => {
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      const txt = ev.results[i][0].transcript.toLowerCase();
+      for (const [re, key, label] of KEYWORDS) if (re.test(txt)) { trigger(key, label); break; }
+    }
+  };
+  rec.onend = () => setTimeout(() => { try { rec.start(); } catch (e) {} }, 400);
+  rec.onerror = () => {};
+  try { rec.start(); } catch (e) {}
+}
+addEventListener("keydown", e => {
+  const m = { 1: "wind", 2: "rain", 3: "night", 4: "day", 5: "snow", 6: "dance", 7: "bow", 8: "hello", 9: "calm" }[e.key];
+  if (m) trigger(m, m); else if (e.key.toLowerCase() === "d") demo = !demo;
+  showHud();
+});
+let hudTimer;
+function showHud() {
+  hud.innerHTML = `Sprich: <b>Wind · Regen · Nacht · Licht · Schnee · Schmetterling · Wanderer · Hallo · Ruhe</b> · Tasten <kbd>1</kbd>–<kbd>9</kbd>`;
+  document.body.classList.add("show-hud"); clearTimeout(hudTimer);
+  hudTimer = setTimeout(() => document.body.classList.remove("show-hud"), 3000);
+}
+addEventListener("mousemove", showHud);
+
+// ---------------------------------------------------------------- Ablauf der Effekte (weich ein/aus)
+const fx = { wind: 0, rain: 0, night: 0, day: 0, snow: 0, dance: 0, bow: 0, hello: 0 };
+const decay = { wind: 10, rain: 14, snow: 18, dance: 7, bow: 4, hello: 2.5, night: 1e9, day: 1e9 };
+const since = {};
+function stepFx(t) {
+  for (const k in fx) {
+    if (state[k]) { since[k] = since[k] ?? t; if (t - since[k] > decay[k]) state[k] = 0; }
+    else since[k] = undefined;
+    fx[k] += ((state[k] ? 1 : 0) - fx[k]) * (state[k] ? 0.04 : 0.02);
+  }
+}
+
+// ---------------------------------------------------------------- Tusche-Helfer (Pinselstrich wie das Blattwerk auf dem Papier)
+function brush(c, pts, width, alpha, bristles, R) {
+  c.lineCap = "round"; c.lineJoin = "round";
+  for (let b = 0; b < bristles; b++) {
+    const o = (b / (bristles - 1) - 0.5) * width * 0.9;
+    c.strokeStyle = `rgba(42,36,32,${alpha * (0.5 + 0.6 * R())})`; c.lineWidth = Math.max(0.6, width * 0.3);
+    c.beginPath();
+    for (let i = 0; i < pts.length; i++) {
+      const [x, y] = pts[i], prev = pts[Math.max(0, i - 1)];
+      const nx = -(y - prev[1]), ny = x - prev[0], nl = Math.hypot(nx, ny) || 1;
+      const px = x + nx / nl * o, py = y + ny / nl * o;
+      if (i === 0) c.moveTo(px, py); else c.lineTo(px, py);
+    }
+    c.stroke();
+  }
+}
+function wash(c, x, y, rx, ry, rot, alpha) {
+  c.save(); c.translate(x, y); c.rotate(rot);
+  const g = c.createRadialGradient(0, 0, 0, 0, 0, Math.max(rx, ry));
+  g.addColorStop(0, `rgba(48,40,36,${alpha})`); g.addColorStop(0.7, `rgba(48,40,36,${alpha * 0.55})`); g.addColorStop(1, "rgba(48,40,36,0)");
+  c.fillStyle = g; c.beginPath(); c.ellipse(0, 0, rx, ry, 0, 0, 7); c.fill(); c.restore();
+}
+function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+// ---------------------------------------------------------------- Wanderer: Tuschefigur mit Kasa, wehendem Gewand, Stab, Kuerbis
+let walkerT = +(q.get("start") || 0.3);          // Startposition (0 = links hinter dem Rahmen)
+function drawWalker(c, t, dt) {
+  const [wx0, wy0, wx1, wy1] = G.window;
+  const H = (wy1 - wy0) * 0.25 * L.s;                            // Figurhoehe
+  const speed = (1 - 0.7 * fx.bow) * (0.028 + 0.012 * level);    // Fensterbreiten pro Sekunde
+  walkerT += dt * speed;
+  const u = walkerT % 1.35 - 0.15;                               // hinter dem Rahmen ein- und austreten
+  const groundY = wy1 - (wy1 - wy0) * 0.055;
+  const [X, Y] = P(wx0 + u * (wx1 - wx0), groundY + 6 * Math.sin(u * 9));
+  const ph = walkerT * 2 * Math.PI * 9;                          // Schrittphase
+  const R = mulberry(Math.floor(t * 8));                         // ruhiges Zittern der Tusche
+  c.save(); c.translate(X, Y);
+  c.rotate(0.08 + 0.25 * fx.wind + 0.35 * fx.bow);               // gegen den Wind / Verbeugung
+  const bob = -Math.abs(Math.cos(ph)) * H * 0.02;
+  for (let k = 0; k < 2; k++) {                                  // Beine mit Knie, Fuesse als Tupfer
+    const sw = Math.sin(ph + k * Math.PI), a = 0.42 * sw, bend = 0.6 * Math.max(0, -Math.cos(ph + k * Math.PI));
+    const hip = [0, -H * 0.45 + bob], knee = [Math.sin(a) * H * 0.22, hip[1] + Math.cos(a) * H * 0.22];
+    const foot = [knee[0] + Math.sin(a - bend) * H * 0.24, Math.min(0, knee[1] + Math.cos(a - bend) * H * 0.24)];
+    brush(c, [hip, knee, foot], H * 0.05, 0.55, 4, R);
+    wash(c, foot[0] + H * 0.02, foot[1], H * 0.045, H * 0.018, 0, 0.5);
+  }
+  const flare = H * (0.16 + 0.12 * fx.wind), sway = Math.sin(ph) * H * 0.02 - fx.wind * H * 0.06;   // Gewand
+  c.beginPath();
+  c.moveTo(-H * 0.08, -H * 0.80 + bob); c.lineTo(H * 0.09, -H * 0.80 + bob);
+  c.bezierCurveTo(H * 0.16, -H * 0.6 + bob, H * 0.14 + sway, -H * 0.45 + bob, H * 0.11 + sway * 0.6, -H * 0.36 + bob);
+  c.lineTo(-flare + sway, -H * 0.34 + bob);
+  c.bezierCurveTo(-H * 0.16, -H * 0.5 + bob, -H * 0.12, -H * 0.65 + bob, -H * 0.08, -H * 0.80 + bob);
+  c.closePath();
+  const gg = c.createLinearGradient(-flare, 0, H * 0.1, 0);
+  gg.addColorStop(0, "rgba(42,36,32,0.45)"); gg.addColorStop(1, "rgba(42,36,32,0.72)");
+  c.fillStyle = gg; c.fill();
+  wash(c, -H * 0.13, -H * 0.70 + bob, H * 0.075, H * 0.09, -0.4, 0.75);            // Buendel
+  wash(c, H * 0.01, -H * 0.86 + bob, H * 0.05, H * 0.055, 0, 0.8);                 // Kopf
+  c.beginPath(); c.moveTo(-H * 0.21, -H * 0.86 + bob);                             // Kasa
+  c.quadraticCurveTo(0, -H * 1.02 + bob, H * 0.23, -H * 0.86 + bob);
+  c.quadraticCurveTo(H * 0.01, -H * 0.83 + bob, -H * 0.21, -H * 0.86 + bob); c.closePath();
+  c.fillStyle = "rgba(42,36,32,0.78)"; c.fill();
+  const armA = 0.3 * Math.sin(ph), sh = [H * 0.03, -H * 0.76 + bob];               // Arme + Stab
+  const hand = [sh[0] + Math.sin(0.55 + armA) * H * 0.2, sh[1] + Math.cos(0.55 + armA) * H * 0.2];
+  brush(c, [sh, hand], H * 0.045, 0.6, 4, R);
+  brush(c, [[sh[0] - H * 0.02, sh[1]], [sh[0] - H * 0.02 - Math.sin(armA) * H * 0.15, sh[1] + H * 0.16]], H * 0.04, 0.5, 4, R);
+  const stTop = [hand[0] - H * 0.02, hand[1] - H * 0.3], stBot = [hand[0] + H * 0.07, 0];
+  brush(c, [stTop, stBot], H * 0.022, 0.75, 3, R);
+  const gsw = Math.sin(ph * 0.5) * 0.2 + fx.wind * 0.4;                            // Kuerbisflasche am Stab
+  wash(c, stTop[0] + Math.sin(gsw) * H * 0.07, stTop[1] + H * 0.06 + Math.cos(gsw) * H * 0.06, H * 0.03, H * 0.04, 0, 0.7);
+  c.restore();
+}
+
+// ---------------------------------------------------------------- Schmetterling (wie im Foto: gelb mit dunklen Tupfen)
+const bf = { x: 0, y: 0, tx: 0, ty: 0, ph: 0, init: false };
+function drawButterfly(c, t, dt) {
+  const [bx, by, br] = G.butterfly;
+  if (!bf.init) { bf.x = bx; bf.y = by; bf.tx = bx; bf.ty = by; bf.init = true; }
+  const [wx0, wy0, wx1, wy1] = G.window;
+  const active = 0.15 + 0.85 * levelFast + fx.dance;              // Stimme laesst ihn flattern
+  if (Math.random() < dt * (0.15 + 1.5 * active)) {
+    if (fx.dance > 0.5) { bf.tx = (wx0 + wx1) / 2 + (Math.random() - 0.5) * (wx1 - wx0) * 0.35; bf.ty = (wy0 + wy1) / 2 + (Math.random() - 0.5) * (wy1 - wy0) * 0.3; }
+    else { bf.tx = bx + (Math.random() - 0.5) * br * (3 + 12 * active); bf.ty = by + (Math.random() - 0.5) * br * (2 + 8 * active); }
+    bf.tx = Math.min(wx1 - br, Math.max(wx0 + br, bf.tx)); bf.ty = Math.min(wy1 - br, Math.max(wy0 + br, bf.ty));
+  }
+  const k = 0.6 + 2.5 * active;
+  bf.x += (bf.tx - bf.x) * Math.min(1, dt * k); bf.y += (bf.ty - bf.y) * Math.min(1, dt * k) + Math.sin(t * 5) * 0.4;
+  bf.ph += dt * (6 + 22 * active);
+  const [X, Y] = P(bf.x, bf.y), s = br * L.s * 0.55, flap = 0.35 + 0.65 * Math.abs(Math.sin(bf.ph));
+  c.save(); c.translate(X, Y); c.rotate(0.3 + 0.15 * Math.sin(t * 1.3));
+  for (const side of [-1, 1]) {
+    c.save(); c.scale(side * flap, 1);
+    c.fillStyle = "rgba(196,170,60,0.82)";
+    c.beginPath(); c.moveTo(0, 0); c.bezierCurveTo(s * 0.9, -s * 1.1, s * 1.5, -s * 0.2, s * 0.35, s * 0.15); c.closePath(); c.fill();
+    c.beginPath(); c.moveTo(0, 0); c.bezierCurveTo(s * 0.7, s * 0.2, s * 0.9, s * 0.9, s * 0.15, s * 0.6); c.closePath(); c.fill();
+    c.fillStyle = "rgba(40,34,30,0.75)";
+    for (const [dx, dy, r] of [[0.55, -0.45, 0.09], [0.9, -0.25, 0.07], [0.45, 0.35, 0.07], [0.75, 0.05, 0.06], [0.25, -0.65, 0.05]]) {
+      c.beginPath(); c.arc(dx * s, dy * s, r * s, 0, 7); c.fill();
+    }
+    c.restore();
+  }
+  c.fillStyle = "rgba(40,34,30,0.8)"; c.beginPath(); c.ellipse(0, 0, s * 0.07, s * 0.35, 0, 0, 7); c.fill();
+  c.restore();
+}
+
+// ---------------------------------------------------------------- Blaetter, Regen, Schnee, Gluehwuermchen
+const petals = [], drops = [], flakes = [], flies = [];
+function stepParticles(t, dt) {
+  const [wx0, wy0, wx1, wy1] = G.window, W = wx1 - wx0, Hh = wy1 - wy0;
+  if (fx.wind > 0.2 && Math.random() < dt * 6 * fx.wind)
+    petals.push({ x: wx0 + W * (0.55 + 0.4 * Math.random()), y: wy0 + Hh * (0.55 + 0.4 * Math.random()), vx: -W * (0.08 + 0.1 * Math.random()), vy: -Hh * 0.05, r: Math.random() * 7, s: 8 + 8 * Math.random(), a: 1 });
+  for (const p of petals) { p.vx += (Math.random() - 0.7) * W * dt * 0.1; p.vy += Hh * dt * 0.05 + (Math.random() - 0.5) * Hh * dt * 0.15; p.x += p.vx * dt; p.y += p.vy * dt; p.r += dt * 3; p.a -= dt * 0.12; }
+  for (let i = petals.length - 1; i >= 0; i--) if (petals[i].a <= 0 || petals[i].x < wx0 - 50) petals.splice(i, 1);
+  if (fx.rain > 0.2 && Math.random() < dt * 60 * fx.rain) drops.push({ x: wx0 + Math.random() * W, y: wy0 - 20, v: Hh * (0.9 + 0.4 * Math.random()) });
+  for (const d of drops) d.y += d.v * dt;
+  for (let i = drops.length - 1; i >= 0; i--) if (drops[i].y > wy1) drops.splice(i, 1);
+  if (fx.snow > 0.2 && Math.random() < dt * 25 * fx.snow) flakes.push({ x: wx0 + Math.random() * W, y: wy0 - 10, v: Hh * (0.04 + 0.03 * Math.random()), ph: Math.random() * 7, s: 2 + 3 * Math.random() });
+  for (const f of flakes) { f.y += f.v * dt; f.x += Math.sin(t * 0.8 + f.ph) * 6 * dt; }
+  for (let i = flakes.length - 1; i >= 0; i--) if (flakes[i].y > wy1) flakes.splice(i, 1);
+  const wantFlies = Math.round(2 + 9 * fx.night);
+  while (flies.length < wantFlies) flies.push({ x: wx0 + Math.random() * W, y: wy0 + Hh * (0.3 + 0.6 * Math.random()), ph: Math.random() * 7, ph2: Math.random() * 7 });
+  while (flies.length > wantFlies) flies.pop();
+  for (const f of flies) { f.x += Math.sin(t * 0.37 + f.ph) * 9 * dt; f.y += Math.cos(t * 0.29 + f.ph2) * 7 * dt; }
+}
+function maskLayer(c) { c.globalCompositeOperation = "destination-in"; c.drawImage(maskImg, L.x, L.y, L.w, L.h); c.globalCompositeOperation = "source-over"; }
+
+// ---------------------------------------------------------------- Bild
+let last = performance.now(), T = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now; T += dt;
+  requestAnimationFrame(frame);
+  if (!ready || !L) return;
+  readLevel(T); stepFx(T); stepParticles(T, dt);
+  const W = cv.width, H = cv.height, [lr, lg, lb] = G.lacquer;
+
+  // 1) Lack ringsum (Farbe aus dem Foto) mit leichtem Glanz, dann das Foto der Laterne
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, `rgb(${lr * 0.9 | 0},${lg * 0.9 | 0},${lb * 0.9 | 0})`); bg.addColorStop(0.5, `rgb(${lr * 1.25 | 0},${lg * 1.2 | 0},${lb * 1.15 | 0})`); bg.addColorStop(1, `rgb(${lr * 0.8 | 0},${lg * 0.8 | 0},${lb * 0.8 | 0})`);
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(img, L.x, L.y, L.w, L.h);
+  // Fotoraender weich in den Lack auslaufen lassen
+  const lac = `rgb(${lr * 1.1 | 0},${lg * 1.1 | 0},${lb * 1.05 | 0})`, fw = L.w * 0.06;
+  for (const [x0, x1] of [[L.x, L.x + fw], [L.x + L.w, L.x + L.w - fw]]) {
+    const g = ctx.createLinearGradient(x0, 0, x1, 0); g.addColorStop(0, lac); g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g; ctx.fillRect(Math.min(x0, x1), L.y, fw, L.h);
+  }
+  for (const [y0, y1] of [[L.y, L.y + fw], [L.y + L.h, L.y + L.h - fw]]) {
+    const g = ctx.createLinearGradient(0, y0, 0, y1); g.addColorStop(0, lac); g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g; ctx.fillRect(L.x, Math.min(y0, y1), L.w, fw);
+  }
+
+  // 2) Licht hinter dem Papier: atmet mit der Stimme, flackert wie eine Gluehbirne; Nacht dunkler, Tag heller
+  const flick = 1 + 0.03 * Math.sin(T * 2.1) * Math.sin(T * 0.63) + 0.015 * Math.sin(T * 9.1);
+  const breath = (0.92 + 0.18 * level + 0.12 * levelFast) * flick;
+  const gain = breath * (1 - 0.45 * fx.night + 0.22 * fx.day) + fx.hello * 0.25 * Math.max(0, Math.sin(T * 6));
+  const [gx, gy] = P(G.glow[0], G.glow[1]);
+  if (gain < 1) {
+    oc.clearRect(0, 0, W, H);
+    oc.fillStyle = `rgba(20,10,5,${Math.min(0.7, (1 - gain) * 1.2)})`; oc.fillRect(0, 0, W, H); maskLayer(oc);
+    ctx.globalCompositeOperation = "multiply"; ctx.drawImage(off, 0, 0); ctx.globalCompositeOperation = "source-over";
+  }
+  oc.clearRect(0, 0, W, H);
+  if (gain > 1) {
+    const g = oc.createRadialGradient(gx, gy, 0, gx, gy, L.h * 0.45), a = Math.min(0.55, (gain - 1) * 1.6);
+    g.addColorStop(0, `rgba(255,190,110,${a})`); g.addColorStop(1, "rgba(255,190,110,0)");
+    oc.fillStyle = g; oc.fillRect(0, 0, W, H);
+  }
+  if (fx.night > 0.05) {                                          // Mond scheint blass durchs Papier, Gluehwuermchen
+    const [wx0, wy0, wx1, wy1] = G.window, [mx, my] = P(wx0 + (wx1 - wx0) * 0.24, wy0 + (wy1 - wy0) * 0.2), mr = (wy1 - wy0) * L.s * 0.075;
+    const g = oc.createRadialGradient(mx, my, mr * 0.2, mx, my, mr * 2.2);
+    g.addColorStop(0, `rgba(255,236,200,${0.55 * fx.night})`); g.addColorStop(0.45, `rgba(255,230,190,${0.22 * fx.night})`); g.addColorStop(1, "rgba(255,230,190,0)");
+    oc.fillStyle = g; oc.beginPath(); oc.arc(mx, my, mr * 2.2, 0, 7); oc.fill();
+    for (const f of flies) {
+      const [fxp, fyp] = P(f.x, f.y), a = fx.night * (0.35 + 0.35 * Math.sin(T * 2.2 + f.ph)) * (0.7 + 0.6 * levelFast), r = 18 * L.s;
+      const gg = oc.createRadialGradient(fxp, fyp, 0, fxp, fyp, r);
+      gg.addColorStop(0, `rgba(255,220,140,${a})`); gg.addColorStop(1, "rgba(255,220,140,0)");
+      oc.fillStyle = gg; oc.beginPath(); oc.arc(fxp, fyp, r, 0, 7); oc.fill();
+    }
+  }
+  maskLayer(oc);
+  ctx.globalCompositeOperation = "screen"; ctx.drawImage(off, 0, 0); ctx.globalCompositeOperation = "source-over";
+
+  // 3) Tusche hinter dem Papier: Wanderer, Blaetter, Regen (weich, multipliziert)
+  ic.clearRect(0, 0, W, H);
+  drawWalker(ic, T, dt);
+  for (const p of petals) { ic.save(); ic.translate(...P(p.x, p.y)); ic.rotate(p.r); ic.fillStyle = `rgba(150,60,40,${0.45 * p.a})`; ic.beginPath(); ic.ellipse(0, 0, p.s * L.s * 0.9, p.s * L.s * 0.45, 0, 0, 7); ic.fill(); ic.restore(); }
+  if (fx.rain > 0.05) { ic.strokeStyle = `rgba(60,52,48,${0.28 * fx.rain})`; ic.lineWidth = 1.2 * L.s; ic.beginPath(); for (const d of drops) { const [x, y] = P(d.x, d.y); ic.moveTo(x, y); ic.lineTo(x - 4 * L.s, y - 26 * L.s); } ic.stroke(); }
+  ic.filter = `blur(${(1.2 * L.s).toFixed(1)}px)`; ic.drawImage(ink, 0, 0); ic.filter = "none";   // Tusche verlaeuft ins Papier
+  maskLayer(ic);
+  ctx.globalCompositeOperation = "multiply"; ctx.drawImage(ink, 0, 0); ctx.globalCompositeOperation = "source-over";
+
+  // 4) Vorne auf dem Papier: Schmetterling, Schnee
+  oc.clearRect(0, 0, W, H);
+  drawButterfly(oc, T, dt);
+  if (fx.snow > 0.05) { oc.fillStyle = `rgba(255,248,235,${0.7 * fx.snow})`; for (const f of flakes) { const [x, y] = P(f.x, f.y); oc.beginPath(); oc.arc(x, y, f.s * L.s, 0, 7); oc.fill(); } }
+  maskLayer(oc);
+  ctx.drawImage(off, 0, 0);
+
+  // 5) Filmkorn, sehr leicht
+  const pat = ctx.createPattern(grainCv, "repeat"); pat.setTransform(new DOMMatrix().translate((T * 137) % 256, (T * 91) % 256));
+  ctx.globalCompositeOperation = "overlay"; ctx.globalAlpha = 0.09; ctx.fillStyle = pat; ctx.fillRect(0, 0, W, H);
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
