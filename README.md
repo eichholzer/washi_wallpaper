@@ -3,6 +3,11 @@
 Ein ruhiger, audioreaktiver Bildschirmhintergrund: ein Raster aus Leuchtboxen hinter Japanpapier (Washi), wie ein
 LED-Lichtbild mit SK6812-LEDs. Das Licht fliesst langsam und reagiert gemittelt über Sekunden auf das Mikrofon.
 Die Farben bleiben im Bereich, den WWA-LEDs darstellen können (Amber 1800 K bis Kaltweiss 6500 K).
+
+Ein einziger Modus: Bei Stille ist das Bild gedämmt (etwa ein Fünftel des Lichts), sobald jemand spricht, hebt sich
+das Licht über einige Sekunden und sinkt danach langsam zurück. Anhaltender Lärm belastet die LEDs: Einzelne Boxen
+fallen aus, werden dunkel und zucken kalt; sie erholen sich erst, wenn es wieder ruhig ist. Das Raster füllt den
+ganzen Bildschirm mit ganzen, fast quadratischen Zellen.
 ## Starten
 
 ```sh
@@ -17,16 +22,13 @@ Seite im Vollbild in Chrome. Ohne Chrome öffnet sie im Standardbrowser.
 
 | Taste | Wirkung |
 |---|---|
-| `1` | Feld: fliessendes Lichtfeld, Ton hebt Helligkeit, Bässe wärmer, Höhen kühler |
-| `2` | Glut: Klang steigt von unten auf und verglimmt |
-| `3` | Wellen: ruhiges Feld mit weichen Lichtwellen bei Beats |
 | `D` | Demo-Audio ↔ Mikrofon |
 
-URL-Parameter: `?modus=feld|glut|wellen`, `?reihen=8` (Boxengrösse, immer ganze Quadrate), `?demo=1`.
+URL-Parameter: `?reihen=8` (Zellengrösse), `?demo=1`, `?stress=0.6` (Lärmbelastung vorgeben, zum Testen).
 
 ## Als Desktop-Hintergrund (macOS)
 
-Mit [Plash](https://sindresorhus.com/plash) die URL `http://localhost:8765/index.html?modus=feld` als Hintergrund
+Mit [Plash](https://sindresorhus.com/plash) die URL `http://localhost:8765/index.html` als Hintergrund
 setzen. Ob Plash das Mikrofon freigibt, hängt von Plash ab; sonst `&demo=1` anhängen.
 
 ## Dateien
